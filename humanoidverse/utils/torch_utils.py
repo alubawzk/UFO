@@ -215,7 +215,7 @@ def unscale_np(x, lower, upper):
     return (2.0 * x - upper - lower) / (upper - lower)
 
 
-# ========== Functions from isaac_utils/rotations.py ==========
+# ========== Quaternion utilities ==========
 # These functions support w_last parameter for quaternion format flexibility
 
 @torch.jit.script

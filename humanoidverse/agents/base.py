@@ -9,7 +9,7 @@ class BaseConfig(pydantic.BaseModel):
     # extra="forbid" -- prevent adding new fields (e.g., accidentally typo-ing argument model-dimm=256 )
     # strict=True -- be strict on types, do not try to cast e.g., "True" --> "1" (or vice versa)
     # use_enum_values=True -- fixes issues with serializing/deserializing enums
-    # frozen=True -- make the model immutable (to match the behavior of exca scripts)
+    # frozen=True -- make the model immutable
     model_config = pydantic.ConfigDict(extra="forbid", strict=True, use_enum_values=True, frozen=True)
 
     name: Literal["BaseConfig"] = "BaseConfig"

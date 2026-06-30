@@ -27,7 +27,7 @@ from .nn_models import (
 def filter_space(obs_space: gymnasium.spaces.Dict, filter: list[int]) -> gymnasium.spaces.Dict:
     assert isinstance(obs_space, gymnasium.spaces.Dict), "BackwardFilterArchiConfig requires a Dict observation space."
     assert len(obs_space.spaces) == 1 and "proprio" in obs_space.spaces, (
-        "Filter nn modules are currently expecting humenv observations only"
+        "Filter nn modules are currently expecting dictionary observations only"
     )
     obs_space = obs_space.spaces["proprio"]
     filtered_space = gymnasium.spaces.Box(low=obs_space.low[filter], high=obs_space.high[filter], shape=(len(filter),))

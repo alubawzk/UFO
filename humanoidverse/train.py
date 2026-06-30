@@ -26,20 +26,16 @@ from pathlib import Path
 from typing import Dict, List
 from torch.utils._pytree import tree_map
 
-import exca as xk
 import gymnasium
 import numpy as np
 import pydantic
 import torch  # better to use scoped import if we use processes
-import tyro
 import wandb
 from packaging.version import Version
-from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
 
 from humanoidverse.agents.base import BaseConfig
-from humanoidverse.agents.buffers.load_data import load_expert_trajectories
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer, dtype_numpytotorch_lower_precision
 from humanoidverse.agents.fb_cpr.agent import FBcprAgentConfig
@@ -53,11 +49,6 @@ REWARD_EVAL_LOG_FILENAME = "reward_eval_log.csv"
 TRACKING_EVAL_LOG_FILENAME = "tracking_eval_log.csv"
 
 CHECKPOINT_DIR_NAME = "checkpoint"
-
-_ENC_CONFIG_TO_EXPERT_DATA_OBS_MAPPER = {
-    HumanoidVerseMjlabConfig: None,
-}
-
 
 
 Evaluation = tp.Annotated[
@@ -138,8 +129,7 @@ class TrainConfig(BaseConfig):
 
     tags: dict = pydantic.Field(default_factory=lambda: {})
 
-    # exca
-    infra: xk.TaskInfra = xk.TaskInfra(version="1")
+    infra: dict = pydantic.Field(default_factory=dict)
 
     def model_post_init(self, context):
         # TODO prioritization needs tracking eval to work, but this is bit hacky to check for it
@@ -174,7 +164,6 @@ class TrainConfig(BaseConfig):
                 log_names.add(eval_cfg.name_in_logs)
 
     def build(self):
-        """In case of cluster run, use exca and process instead of explivit build"""
         return Workspace(self)
 
 
@@ -536,15 +525,9 @@ class Workspace:
             if self.cfg.load_expert_data_from_motion_lib:
                 expert_buffer = load_expert_trajectories_from_motion_lib(self.train_env._env, self.cfg.agent, device=self.cfg.buffer_device)
             else:
-                print("Loading expert trajectories")
-                expert_buffer = load_expert_trajectories(
-                    self.cfg.motions,
-                    self.cfg.motions_root,
-                    seq_length=self.agent.cfg.model.seq_length,
-                    device=self.cfg.buffer_device,
-                    # TODO data stored in disk does not have dictionary obs, so we need to manually
-                    #      define what obs key the data on disk corresponds to
-                    obs_dict_mapper=_ENC_CONFIG_TO_EXPERT_DATA_OBS_MAPPER[self.cfg.env.__class__],
+                raise RuntimeError(
+                    "This MJLab-focused build only supports expert data loaded from the motion library. "
+                    "Set load_expert_data_from_motion_lib=True."
                 )
         print("Creating the training environment")
 

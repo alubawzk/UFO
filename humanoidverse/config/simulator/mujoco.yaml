@@ -2,8 +2,6 @@
 
 # Env structure
 simulator:
-  _target_: humanoidverse.simulator.mujoco.mujoco.MuJoCo
-  _recursive_: False
   config:
     name: "mujoco"
     terrain: ${terrain}

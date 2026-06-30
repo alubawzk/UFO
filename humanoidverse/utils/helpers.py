@@ -156,7 +156,7 @@ class PolicyExporterLSTM(torch.nn.Module):
 
 def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, velocity_multiplier: float = 1.0) -> torch.Tensor:
     from humanoidverse.utils.torch_utils import quat_rotate_inverse
-    from humanoidverse.envs.legged_robot_motions.legged_robot_motions import compute_humanoid_observations_max, compute_humanoid_observations_max_with_contact
+    from humanoidverse.envs.motion_observations import compute_humanoid_observations_max, compute_humanoid_observations_max_with_contact
     
     motion_times = torch.arange(int(np.ceil((env._motion_lib._motion_lengths[motion_id]/env.dt).cpu()))).to(env.device) * env.dt
     

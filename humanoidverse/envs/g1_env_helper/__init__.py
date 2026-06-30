@@ -4,7 +4,6 @@ from typing import Optional, Sequence, Union
 import mujoco
 import numpy as np
 
-# For backward compatibility; xmls now live in data/robots/g1 (see utils.g1_env_config.get_g1_robot_xml_root)
 ROOT_PATH = Path(__file__).parent
 
 

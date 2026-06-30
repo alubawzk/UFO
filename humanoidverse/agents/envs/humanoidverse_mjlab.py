@@ -1,7 +1,7 @@
 """MJLab/MuJoCo-Warp bridge for BFM-Zero.
 
 This module intentionally mirrors the public surface of
-``humanoidverse_isaac.HumanoidVerseVectorEnv`` so the existing FBcprAux training
+the old HumanoidVerse vector-env adapter so the existing FBcprAux training
 loop can be reused without replacing the algorithm with MJLab/RSL-RL PPO.
 MJLab owns batched physics stepping; this wrapper reconstructs the observation,
 reward, reset and info dictionaries expected by the original BFM-Zero code.
@@ -26,7 +26,7 @@ from torch.utils._pytree import tree_map
 
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
-from humanoidverse.envs.legged_robot_motions.legged_robot_motions import compute_humanoid_observations_max
+from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.utils.helpers import pre_process_config
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
 from humanoidverse.utils.torch_utils import (

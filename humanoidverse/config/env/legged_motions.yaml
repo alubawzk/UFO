@@ -5,7 +5,6 @@ defaults:
 
 # Env structure
 env:
-  _target_: humanoidverse.envs.legged_robot_motions.legged_robot_motions.LeggedRobotMotions
   config:
     max_episode_length_s: 10
     termination:

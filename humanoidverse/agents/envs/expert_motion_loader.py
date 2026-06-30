@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
-from humanoidverse.envs.legged_robot_motions.legged_robot_motions import compute_humanoid_observations_max
+from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.utils.torch_utils import quat_rotate_inverse
 
 from ..buffers.trajectory import TrajectoryDictBuffer

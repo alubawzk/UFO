@@ -5,8 +5,6 @@ defaults:
 
 # Env structure
 env:
-  _target_: humanoidverse.envs.legged_base_task.legged_robot_base.LeggedRobotBase
-  _recursive_: False
   config:
     robot: ${robot}
     domain_rand: ${domain_rand}

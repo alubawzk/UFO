@@ -120,7 +120,7 @@ xpos_bodies = [
 
 def get_backward_observation(env, motion_id, include_last_action, velocity_multiplier: float = 1.0) -> torch.Tensor:
     import numpy as np
-    from humanoidverse.envs.legged_robot_motions.legged_robot_motions import (
+    from humanoidverse.envs.motion_observations import (
         compute_humanoid_observations_max,
         compute_humanoid_observations_max_with_contact,
     )

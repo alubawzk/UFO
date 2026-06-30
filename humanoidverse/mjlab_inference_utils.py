@@ -102,7 +102,7 @@ def write_g1_mjlab_relabel_xml(source_xml: Path, output_dir: Path) -> Path:
     """Create a G1 MuJoCo XML with 29 ctrl slots for reward relabeling.
 
     MJLab adds DC motor actuators from Python config at env construction time,
-    so the raw G1 XML intentionally has ``nu == 0``. The humenv reward
+    so the raw G1 XML intentionally has ``nu == 0``. The reward
     relabel path calls ``data.ctrl[:] = action`` directly; it therefore needs a
     pure MuJoCo model with one actuator per policy action. These gear=1 motors
     are used only to size/populate ``data.ctrl`` and do not change the qpos/qvel

@@ -1,8 +1,6 @@
 # @package _global_
 
 env:
-  _target_: humanoidverse.envs.base_task.base_task.BaseTask
-  _recursive_: False
   config:
     experiment_name: ${experiment_name}
     num_envs: ${num_envs}

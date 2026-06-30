@@ -3,28 +3,25 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "motivo-isaac"
+name = "bfmzero-mjlab"
 version = "0.1.0"
-description = "Add your description here"
+description = "BFM-Zero MJLab training and inference"
 readme = "README.md"
 requires-python = "==3.10.*"
 dependencies = [
+    "dm-control>=1.0.20",
     "easydict>=1.13",
-    "exca>=0.2.5",
-    "hf-xet>=1.1.2",
-    "huggingface-hub>=0.30.2",
+    "gymnasium>=0.29.0",
+    "h5py>=3.14.0",
     "hydra-core>=1.2.0",
     "joblib>=1.4.2",
     "loguru>=0.7.3",
     "lxml>=5.3.2",
     "mediapy>=1.2.3",
     "mjlab==1.4.0",
-    "ml-collections>=1.1.0",
     "mujoco~=3.8.0",
-    "notebook>=7.4.2",
     "numpy-stl>=3.2.0",
     "onnx>=1.16.1",
-    "onnxruntime>=1.22.0",
     "open3d>=0.19.0",
     "pot>=0.9.5",
     "pydantic>=2.11.3",
@@ -34,9 +31,7 @@ dependencies = [
     "termcolor>=3.0.1",
     "torch>=2.7.0,<2.8.0",
     "torchrunx>=0.3.4",
-    "tyro>=0.9.18",
     "wandb>=0.26.0",
-    "xxhash>=3.5.0",
 ]
 
 [[tool.uv.index]]
@@ -49,15 +44,6 @@ url = "https://pypi.nvidia.com/"
 #     "pygame>=2.0.0",
 # ]
 
-[project.optional-dependencies]
-humenv = [
-    "humenv",
-]
-
-[tool.uv.sources]
-# unitree-sdk2py = { path = "unitree_sdk2_python", editable = true }
-humenv = { git = "https://github.com/facebookresearch/humenv.git" }
-
 [tool.setuptools]
 include-package-data = true
 
@@ -67,12 +53,15 @@ humanoidverse = ["config/**/*", "data/**/*"]
 [tool.setuptools.packages.find]
 include = ["humanoidverse*"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "ruff==0.9.6",
 ]
+
+[tool.uv]
 index-strategy = "unsafe-best-match"
 override-dependencies = [
+    "dm-control>=1.0.20",
     "wandb>=0.26.0",
 ]
 
