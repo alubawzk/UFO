@@ -1,0 +1,23 @@
+# Python/runtime artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Local experiment outputs
+_wandb/
+wandb/
+_smoke_runs/
+runs/
+cache/
+checkpoint/
+tea_debug.log
+*.log
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+# Generated inference media
+model/

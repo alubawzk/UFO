@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export BFMZERO_MJLAB_CACHE_DIR="${BFMZERO_MJLAB_CACHE_DIR:-/data/xue/bfmzero-mjlab/cache}"
+mkdir -p \
+  "$BFMZERO_MJLAB_CACHE_DIR/uv" \
+  "$BFMZERO_MJLAB_CACHE_DIR/pycache" \
+  "$BFMZERO_MJLAB_CACHE_DIR/tmp" \
+  "$BFMZERO_MJLAB_CACHE_DIR/torchinductor" \
+  "$BFMZERO_MJLAB_CACHE_DIR/triton" \
+  "$BFMZERO_MJLAB_CACHE_DIR/cuda" \
+  "$BFMZERO_MJLAB_CACHE_DIR/warp"
+
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$BFMZERO_MJLAB_CACHE_DIR/uv}"
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-$BFMZERO_MJLAB_CACHE_DIR/pycache}"
+export TMPDIR="${TMPDIR:-$BFMZERO_MJLAB_CACHE_DIR/tmp}"
+export TEMP="${TEMP:-$TMPDIR}"
+export TMP="${TMP:-$TMPDIR}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$BFMZERO_MJLAB_CACHE_DIR/torchinductor}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$BFMZERO_MJLAB_CACHE_DIR/triton}"
+export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-$BFMZERO_MJLAB_CACHE_DIR/cuda}"
+export WARP_CACHE_PATH="${WARP_CACHE_PATH:-$BFMZERO_MJLAB_CACHE_DIR/warp}"
+
+exec uv run python -m humanoidverse.train_mjlab "$@"
