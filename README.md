@@ -1,31 +1,4 @@
-<h1 align="center"> BFM-Zero: A Promptable Behavioral Foundation Model for Humanoid Control Using Unsupervised Reinforcement Learning </h1>
 
-<div align="center">
-
-[[arXiv]](https://arxiv.org/abs/2511.04131)
-[[Paper]](https://lecar-lab.github.io/BFM-Zero/resources/paper.pdf)
-[[Website]](https://lecar-lab.github.io/BFM-Zero/)
-
-<!-- [[Arxiv]](https://lecar-lab.github.io/SoFTA/) -->
-<!-- [[Video]](https://www.youtube.com/) -->
-
-<img src="static/images/ip.png" style="height:50px;" />
-<img src="static/images/meta.png" style="height:50px;" />
-</div>
-
-## Code
-
-Code will be released in stages:
-
-- [x] **Pretrained checkpoints + sim-to-sim / sim-to-real deployment**  
-  → [`deploy`](https://github.com/LeCAR-Lab/BFM-Zero/tree/deploy) branch
-
-- [x] **Minimal inference code + tutorial**  
-  → [`minimal_inference`](https://github.com/LeCAR-Lab/BFM-Zero/tree/minimal_inference) branch
-
-- [x] **Full training and evaluation pipelines**
-
-- [ ] **Minimal training code (RTX 4090 support)**
 
 # BFM-Zero MJLab Quick Start
 
