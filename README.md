@@ -9,7 +9,7 @@ MJLab/MuJoCo-Warp training does not require IsaacLab. Commands below assume the 
 Install dependencies with `uv`:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd /bfmzero-mjlab
 uv sync
 ```
 
@@ -18,7 +18,7 @@ uv sync
 8-GPU formal training; `--num-envs` is per GPU and `--num-env-steps` is the global step budget:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd /bfmzero-mjlab
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 ./run_mjlab.sh \
