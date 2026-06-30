@@ -2,14 +2,14 @@
 
 # BFM-Zero MJLab Quick Start
 
-MJLab/MuJoCo-Warp training does not require IsaacLab. Commands below assume the repo is at `/home/xue/bfmzero-mjlab`.
+MJLab/MuJoCo-Warp training does not require IsaacLab. Run commands from the repository root.
 
 ## Install
 
 Install dependencies with `uv`:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd bfmzero-mjlab
 uv sync
 ```
 
@@ -18,14 +18,14 @@ uv sync
 8-GPU formal training; `--num-envs` is per GPU and `--num-env-steps` is the global step budget:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd bfmzero-mjlab
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 ./run_mjlab.sh \
   --gpu-ids all \
   --num-envs 1024 \
   --num-env-steps 384000000 \
-  --work-dir /data/xue/bfmzero-mjlab/runs/formal_8gpu_mjlab_clean_eval \
+  --work-dir /path/to/runs/formal_8gpu_mjlab_clean_eval \
   --use-wandb
 ```
 
@@ -36,12 +36,12 @@ Remove `--use-wandb` if you do not want W&B logging.
 Run after a checkpoint exists; saves expert-vs-policy video and `z`:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd bfmzero-mjlab
 
 CUDA_VISIBLE_DEVICES=0 \
 uv run python -m humanoidverse.tracking_inference_mjlab \
-  --model-folder /data/xue/bfmzero-mjlab/runs/formal_8gpu_mjlab_clean_eval \
-  --data-path /data/xue/bfmzero/data/lafan_29dof.pkl \
+  --model-folder /path/to/runs/formal_8gpu_mjlab_clean_eval \
+  --data-path /path/to/lafan_29dof.pkl \
   --device cuda:0 \
   --headless \
   --disable-dr \
@@ -58,12 +58,12 @@ Outputs go to `<model-folder>/tracking_inference_mjlab/`.
 Computes goal-conditioned `z`; optionally exports ONNX:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd bfmzero-mjlab
 
 CUDA_VISIBLE_DEVICES=0 \
 uv run python -m humanoidverse.goal_inference_mjlab \
-  --model-folder /data/xue/bfmzero-mjlab/runs/formal_8gpu_mjlab_clean_eval \
-  --data-path /data/xue/bfmzero/data/lafan_29dof.pkl \
+  --model-folder /path/to/runs/formal_8gpu_mjlab_clean_eval \
+  --data-path /path/to/lafan_29dof.pkl \
   --device cuda:0 \
   --headless \
   --disable-dr \
@@ -79,12 +79,12 @@ Outputs go to `<model-folder>/goal_inference_mjlab/`.
 Computes reward-task `z` from one rank-local replay buffer shard:
 
 ```bash
-cd /home/xue/bfmzero-mjlab
+cd bfmzero-mjlab
 
 CUDA_VISIBLE_DEVICES=0 \
 uv run python -m humanoidverse.reward_inference_mjlab \
-  --model-folder /data/xue/bfmzero-mjlab/runs/formal_8gpu_mjlab_clean_eval \
-  --data-path /data/xue/bfmzero/data/lafan_29dof.pkl \
+  --model-folder /path/to/runs/formal_8gpu_mjlab_clean_eval \
+  --data-path /path/to/lafan_29dof.pkl \
   --device cuda:0 \
   --headless \
   --disable-dr \
