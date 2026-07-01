@@ -7,6 +7,12 @@ MJLab environment used by training.
 
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import time
 from pathlib import Path
@@ -87,6 +93,28 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
         use_29dof=True,
     )
     print(f"[INFO] Exported model to {output_dir / f'{model_name}.onnx'}")
+
+
+def _default_standing_target_states(wrapped_env, device: str) -> dict[str, torch.Tensor]:
+    core_env = wrapped_env._env
+    num_envs = int(core_env.num_envs)
+    env_device = core_env.device
+
+    init_state = core_env.config.robot.init_state
+    root_pos = torch.as_tensor(init_state.pos, device=env_device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1)
+    if hasattr(core_env, "env_origins"):
+        root_pos = root_pos + core_env.env_origins.to(device=env_device, dtype=torch.float32)
+    root_rot_xyzw = torch.as_tensor(init_state.rot, device=env_device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1)
+    root_lin_vel = torch.zeros((num_envs, 3), device=env_device, dtype=torch.float32)
+    root_ang_vel = torch.zeros((num_envs, 3), device=env_device, dtype=torch.float32)
+    root_state_xyzw = torch.cat([root_pos, root_rot_xyzw, root_lin_vel, root_ang_vel], dim=-1)
+
+    dof_state = torch.zeros((num_envs, core_env.num_dof, 2), device=env_device, dtype=torch.float32)
+    dof_state[..., 0] = core_env.default_dof_pos.to(device=env_device, dtype=torch.float32)
+    return {
+        "root_states": root_state_xyzw.to(device=device, dtype=torch.float32),
+        "dof_states": dof_state.to(device=device, dtype=torch.float32),
+    }
 
 
 def _load_replay_buffer(
@@ -237,7 +265,9 @@ def run_reward_inference(
             frames = []
             for z_cpu in z_dict[task]:
                 z = z_cpu.to(device).repeat(1, 1)
-                observation, _info = wrapped_env.reset(to_numpy=False, reset_to_default_pose=True)
+                target_states = _default_standing_target_states(wrapped_env, device=device)
+                observation, _info = wrapped_env.reset(to_numpy=False, target_states=target_states)
+                print("[INFO] Reset reward rollout to default standing pose.")
                 use_env_render = True
                 if save_mp4:
                     frame, use_env_render = render_policy_frame(wrapped_env, renderer, use_env_render=use_env_render)

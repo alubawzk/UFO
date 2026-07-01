@@ -7,6 +7,12 @@ MJLab rollout state with pure MuJoCo qpos fallback.
 
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import argparse
 import json
 from pathlib import Path
@@ -61,6 +67,22 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
         use_29dof=True,
     )
     print(f"[INFO] Exported model to {output_dir / f'{model_name}.onnx'}")
+
+
+def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str) -> dict[str, torch.Tensor]:
+    root_state_xyzw = torch.cat(
+        [
+            obs_dict["ref_body_pos"][0, 0],
+            obs_dict["ref_body_rots"][0, 0],
+            obs_dict["ref_body_vels"][0, 0],
+            obs_dict["ref_body_angular_vels"][0, 0],
+        ],
+        dim=-1,
+    ).to(device=device, dtype=torch.float32)
+    dof_state = torch.zeros((29, 2), device=device, dtype=torch.float32)
+    dof_state[:, 0] = obs_dict["dof_pos"][0].to(device=device, dtype=torch.float32)
+    dof_state[:, 1] = obs_dict["ref_dof_vel"][0].to(device=device, dtype=torch.float32)
+    return {"root_states": root_state_xyzw.unsqueeze(0), "dof_states": dof_state.unsqueeze(0)}
 
 
 def run_goal_inference(
@@ -126,6 +148,9 @@ def run_goal_inference(
 
         with _find_goal_json(goal_json).open("r") as f:
             goals_to_evaluate = json.load(f)
+        if not goals_to_evaluate:
+            raise RuntimeError("Goal JSON is empty.")
+        first_goal = goals_to_evaluate[0]
 
         z_dict: dict[str, object] = {}
         with torch.no_grad():
@@ -171,7 +196,21 @@ def run_goal_inference(
             camera_elevation=camera_elevation,
         )
         try:
-            observation, _info = wrapped_env.reset(to_numpy=False)
+            first_motion_id = int(first_goal["motion_id"])
+            env.set_is_evaluating(first_motion_id)
+            _first_backward_obs, first_obs_dict = get_backward_observation(
+                env,
+                0,
+                use_root_height_obs=use_root_height_obs,
+                velocity_multiplier=0,
+            )
+            target_states = _target_states_from_obs(first_obs_dict, device=device)
+            observation, _info = wrapped_env.reset(to_numpy=False, target_states=target_states)
+            first_motion_name = first_goal.get("motion_name", "unknown")
+            print(
+                f"[INFO] Reset goal rollout to demo start: "
+                f"motion_id={first_motion_id}, motion_name={first_motion_name}, frame=0"
+            )
             frames = []
             goal_idx = -1
             goal_names = list(z_dict.keys())
@@ -211,7 +250,7 @@ def parse_args() -> argparse.Namespace:
     add_bool_arg(parser, "--save-mp4", False, "Save MJLab policy rollout MP4.")
     add_bool_arg(parser, "--disable-dr", False, "Disable domain randomization.")
     add_bool_arg(parser, "--disable-obs-noise", False, "Disable observation noise.")
-    parser.add_argument("--episode-len", type=int, default=500)
+    parser.add_argument("--episode-len", type=int, default=2100)
     parser.add_argument("--goal-switch-interval", type=int, default=100)
     parser.add_argument("--render-size", type=int, default=480)
     parser.add_argument("--camera-distance", type=float, default=3.0)
