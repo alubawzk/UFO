@@ -430,7 +430,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--work-dir", default="/data/xue/bfmzero-mjlab")
     parser.add_argument("--num-envs", type=int, default=1024)
     parser.add_argument("--num-env-steps", type=int, default=384000000)
-    parser.add_argument("--checkpoint-every-steps", type=int, default=9600000)
+    parser.add_argument("--checkpoint-every-steps", type=int, default=3200000)
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-run-name", default=None)
