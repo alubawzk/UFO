@@ -64,7 +64,43 @@ def build_bfm_zero_agent(
     update_z_every_step: int = DEFAULT_UPDATE_Z_EVERY_STEP,
     lr_scale: float = 1.0,
     clip_grad_norm: float = 0.0,
+    cartwheel_aux_safe: bool = False,
 ) -> FBcprAuxAgentConfig:
+    if cartwheel_aux_safe:
+        aux_rewards = [
+            "penalty_torques",
+            "penalty_action_rate",
+            "limits_dof_pos",
+            "limits_torque",
+        ]
+        aux_rewards_scaling = {
+            "penalty_action_rate": -0.03,
+            "limits_dof_pos": -10.0,
+            "penalty_torques": 0.0,
+            "limits_torque": 0.0,
+        }
+    else:
+        aux_rewards = [
+            "penalty_torques",
+            "penalty_action_rate",
+            "limits_dof_pos",
+            "limits_torque",
+            "penalty_undesired_contact",
+            "penalty_feet_ori",
+            "penalty_ankle_roll",
+            "penalty_slippage",
+        ]
+        aux_rewards_scaling = {
+            "penalty_action_rate": -0.1,
+            "penalty_feet_ori": -0.4,
+            "penalty_ankle_roll": -4.0,
+            "limits_dof_pos": -10.0,
+            "penalty_slippage": -2.0,
+            "penalty_undesired_contact": -1.0,
+            "penalty_torques": 0.0,
+            "limits_torque": 0.0,
+        }
+
     return FBcprAuxAgentConfig(
         name="FBcprAuxAgent",
         model=FBcprAuxModelConfig(
@@ -184,26 +220,8 @@ def build_bfm_zero_agent(
             reg_coeff_aux=0.02,
             aux_critic_pessimism_penalty=0.5,
         ),
-        aux_rewards=[
-            "penalty_torques",
-            "penalty_action_rate",
-            "limits_dof_pos",
-            "limits_torque",
-            "penalty_undesired_contact",
-            "penalty_feet_ori",
-            "penalty_ankle_roll",
-            "penalty_slippage",
-        ],
-        aux_rewards_scaling={
-            "penalty_action_rate": -0.1,
-            "penalty_feet_ori": -0.4,
-            "penalty_ankle_roll": -4.0,
-            "limits_dof_pos": -10.0,
-            "penalty_slippage": -2.0,
-            "penalty_undesired_contact": -1.0,
-            "penalty_torques": 0.0,
-            "limits_torque": 0.0,
-        },
+        aux_rewards=aux_rewards,
+        aux_rewards_scaling=aux_rewards_scaling,
         cudagraphs=False,
         compile=compile,
     )
@@ -374,6 +392,7 @@ def build_ufo_mjlab_config(
     disable_obs_noise: bool = False,
     lr_scale: float = 1.0,
     clip_grad_norm: float = 0.0,
+    cartwheel_aux_safe: bool = False,
 ) -> TrainConfig:
     evaluations = []
     run_eval_and_prioritization = not smoke and not disable_eval_prioritization
@@ -400,6 +419,7 @@ def build_ufo_mjlab_config(
                 update_z_every_step=update_z_every_step,
                 lr_scale=lr_scale,
                 clip_grad_norm=clip_grad_norm,
+                cartwheel_aux_safe=cartwheel_aux_safe,
             ),
             "wandb_group": "ufo_fb_mjlab",
             "wandb_project": DEFAULT_WANDB_PROJECT,
@@ -435,6 +455,25 @@ def build_ufo_mjlab_config(
     wandb_group = selected["wandb_group"]
     wandb_project = selected["wandb_project"]
     train_runtime = selected["train_runtime"]
+    hydra_overrides = [
+        "robot=g1/g1_29dof_hard_waist",
+        "robot.control.action_scale=0.25",
+        "robot.control.action_clip_value=5.0",
+        "robot.control.normalize_action_to=5.0",
+        "env.config.lie_down_init=True",
+        "env.config.lie_down_init_prob=0.3",
+    ]
+    if cartwheel_aux_safe:
+        hydra_overrides.extend(
+            [
+                "rewards.reward_scales.penalty_undesired_contact=0.0",
+                "rewards.reward_scales.penalty_feet_ori=0.0",
+                "rewards.reward_scales.feet_heading_alignment=0.0",
+                "rewards.reward_scales.penalty_slippage=0.0",
+                "rewards.reward_scales.penalty_ankle_roll=0.0",
+                "rewards.reward_scales.penalty_action_rate=-0.1",
+            ]
+        )
 
     return TrainConfig(
         name="TrainConfig",
@@ -451,14 +490,7 @@ def build_ufo_mjlab_config(
             disable_domain_randomization=disable_dr,
             relative_config_path="exp/bfm_zero/bfm_zero",
             include_last_action=True,
-            hydra_overrides=[
-                "robot=g1/g1_29dof_hard_waist",
-                "robot.control.action_scale=0.25",
-                "robot.control.action_clip_value=5.0",
-                "robot.control.normalize_action_to=5.0",
-                "env.config.lie_down_init=True",
-                "env.config.lie_down_init_prob=0.3",
-            ],
+            hydra_overrides=hydra_overrides,
             context_length=None,
             include_history_actor=True,
             include_history_noaction=False,
@@ -571,6 +603,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         disable_obs_noise=bool(args.disable_obs_noise),
         lr_scale=args.lr_scale,
         clip_grad_norm=args.clip_grad_norm,
+        cartwheel_aux_safe=bool(args.cartwheel_aux_safe),
     )
     print(
         "[INFO] UFO MJLab train: "
@@ -578,6 +611,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"mjcf_path={cfg.env.mjcf_path}, data_path={cfg.env.lafan_tail_path}, "
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
+        f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"compile={cfg.agent.compile}",
         flush=True,
@@ -663,6 +697,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-obs-noise", action="store_true", help="Disable observation noise for training.")
     parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TLDR preset ignores this value.")
     parser.add_argument("--clip-grad-norm", type=float, default=0.0, help="Enable FB actor/FB gradient clipping when > 0.")
+    parser.add_argument(
+        "--cartwheel-aux-safe",
+        action="store_true",
+        help="Use a cartwheel-safe FB auxiliary reward set: remove locomotion contact/foot-shape penalties and reduce action-rate penalty.",
+    )
     parser.add_argument("--seed", type=int, default=4728)
     parser.add_argument("--use-wandb", action="store_true")
     parser.add_argument("--wandb-run-name", default=None)
@@ -685,6 +724,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--lr-scale must be positive")
     if args.clip_grad_norm < 0:
         raise ValueError("--clip-grad-norm must be non-negative")
+    if args.cartwheel_aux_safe and args.agent != "fb":
+        raise ValueError("--cartwheel-aux-safe is only supported with --agent fb")
     return args
 
 
