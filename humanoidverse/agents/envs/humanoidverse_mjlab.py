@@ -47,7 +47,7 @@ else:
 
 HYDRA_CONFIG_DIR = os.path.join(HUMANOIDVERSE_DIR, "config")
 HYDRA_CONFIG_REL_PATH = os.path.join("exp", "bfm_zero", "bfm_zero")
-G1_MJLAB_MJCF_PATH = "humanoidverse/data/robots/g1_mjlab/g1-mode_13_15.xml"
+G1_MJLAB_MJCF_PATH = "humanoidverse/data/robots/g1_mjlab/g1_29dof.xml"
 G1_MJLAB_ACTUATOR_SOURCE = "g1-mode_15"
 
 
