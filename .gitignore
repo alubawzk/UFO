@@ -22,6 +22,3 @@ tea_debug.log
 .idea/
 # Generated inference media
 model/
-website/public/media/*.mp4
-website/public/media/*.webm
-website/public/media/*.gif
