@@ -271,14 +271,14 @@ class MotionLibBase():
         return sample_idxes[torch.randperm(sample_idxes.numel(), device=self._device)]
         
     def update_soft_sampling_weight(self, failed_keys):
-        # sampling weight based on evaluation, only "mostly" trained on "failed" sequences. Auto PMCP. 
+        # Sampling weight based on evaluation, mostly training on failed sequences.
         if len(failed_keys) > 0:
             all_keys = self._motion_data_keys.tolist()
             indexes = [all_keys.index(k) for k in failed_keys]
             self._termination_history[indexes] += 1
             self.update_sampling_prob(self._termination_history)    
             
-            print("############################################################ Auto PMCP ############################################################")
+            print("######################################## PMCP-inspired failed-motion prioritization ########################################")
             print(f"Training mostly on {len(self._sampling_prob.cpu().nonzero())} seqs ")
             print(self._motion_data_keys[self._sampling_prob.cpu().nonzero()].flatten())
             print(f"###############################################################################################################################")

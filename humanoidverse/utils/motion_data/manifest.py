@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,12 +50,17 @@ def _load_manifest(manifest_path: str | Path) -> tuple[Path, dict[str, Any], lis
     if not isinstance(datasets, list) or len(datasets) == 0:
         raise ValueError(f"Motion data manifest must contain a non-empty datasets list: {path}")
     normalized: list[dict[str, Any]] = []
+    dataset_names: set[str] = set()
     for idx, item in enumerate(datasets):
         if not isinstance(item, dict):
             raise ValueError(f"Motion data manifest dataset #{idx} must be a mapping")
         for field in ("name", "format", "weight"):
             if field not in item:
                 raise ValueError(f"Motion data manifest dataset #{idx} is missing required field '{field}'")
+        dataset_name = str(item["name"])
+        if dataset_name in dataset_names:
+            raise ValueError(f"Motion data manifest dataset name must be unique: {dataset_name!r}")
+        dataset_names.add(dataset_name)
         has_train_path = "train_path" in item
         has_auto_build = "source_path" in item and "auto_build" in item
         if not has_train_path and not has_auto_build:
@@ -74,11 +80,13 @@ def _normalize_weights(datasets: list[dict[str, Any]]) -> list[float]:
             weight = float(item["weight"])
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Dataset {item.get('name')} has non-numeric weight={item.get('weight')!r}") from exc
+        if not math.isfinite(weight):
+            raise ValueError(f"Dataset {item.get('name')} weight must be finite, got {weight}")
         if weight < 0.0:
             raise ValueError(f"Dataset {item.get('name')} weight must be non-negative, got {weight}")
         weights.append(weight)
     total = sum(weights)
-    if total <= 0.0:
+    if not math.isfinite(total) or total <= 0.0:
         raise ValueError("Motion data manifest weights must sum to a positive value")
     return [weight / total for weight in weights]
 

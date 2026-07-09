@@ -413,6 +413,53 @@ class MotionDataAdapterTest(unittest.TestCase):
             self.assertTrue(Path(result.train_data_paths[0]).exists())
             self.assertTrue(Path(result.train_data_paths[1]).exists())
 
+    def test_manifest_rejects_duplicate_dataset_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "duplicate.yaml"
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "datasets:",
+                        "  - name: pkl",
+                        "    format: ufo_pkl",
+                        "    train_path: a.pkl",
+                        "    weight: 1",
+                        "  - name: pkl",
+                        "    format: ufo_pkl",
+                        "    train_path: b.pkl",
+                        "    weight: 1",
+                    ]
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "dataset name must be unique"):
+                prepare_motion_manifest(manifest_path, cache_root=root / "cache")
+
+    def test_manifest_rejects_invalid_weights(self) -> None:
+        cases = [
+            ("infinite.yaml", "    weight: .inf", "weight must be finite"),
+            ("negative.yaml", "    weight: -1", "weight must be non-negative"),
+            ("zero.yaml", "    weight: 0", "sum to a positive value"),
+        ]
+        for filename, weight_line, error_pattern in cases:
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    manifest_path = root / filename
+                    manifest_path.write_text(
+                        "\n".join(
+                            [
+                                "datasets:",
+                                "  - name: pkl",
+                                "    format: ufo_pkl",
+                                "    train_path: a.pkl",
+                                weight_line,
+                            ]
+                        )
+                    )
+                    with self.assertRaisesRegex(ValueError, error_pattern):
+                        prepare_motion_manifest(manifest_path, cache_root=root / "cache")
+
     def test_manifest_dataset_path_uses_inference_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

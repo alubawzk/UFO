@@ -33,6 +33,20 @@ Core defaults live in `humanoidverse/train.py` and can still be overridden from 
 - `--work-dir`: `runs/ufo`.
 - `--checkpoint-every-steps`: `3200000` global environment steps.
 - `--buffer-size`: `5120000` transitions per GPU.
+- `update_z_every_step`: FB uses `100` by default; TLDR currently uses its preset value `10`.
+
+## Data Import and Current Scope
+
+UFO supports RobotState motion data import through manifests and the import wizard tools. The recommended raw schema is:
+
+- `root_pos`
+- `root_quat`
+- `dof_pos`
+- `fps` or `time`
+
+CSV and NPZ are supported readers for this RobotState schema, and the generated manifest can build full UFO motion pickles plus near-10-second training clips.
+
+This release is still centered on the G1/MJLab training environment. RobotState import makes motion data ingestion robot-aware, but it does not make the training environment fully robot-agnostic or enable arbitrary robots to train without environment and robot-config work.
 
 ## Train FB
 
