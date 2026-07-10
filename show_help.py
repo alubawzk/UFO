@@ -27,9 +27,12 @@ def main() -> None:
         "            /_/           \\_\\",
     ]
 
-    print("\n".join(title))
-    print()
-    print("\n".join(ufo))
+    pad = max(len(line) for line in title) + 4
+    rows = max(len(title), len(ufo))
+    for i in range(rows):
+        left = title[i] if i < len(title) else ""
+        right = ufo[i] if i < len(ufo) else ""
+        print(left.ljust(pad) + right)
     print()
     print("UFO is coming, start your training now!")
     print()
