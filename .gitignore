@@ -22,3 +22,6 @@ tea_debug.log
 .idea/
 # Generated inference media
 model/
+
+# Downloaded public motion data
+humanoidverse/data/lafan_29dof_10s-clipped.pkl
