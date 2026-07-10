@@ -14,16 +14,7 @@ UFO is an unsupervised reinforcement learning framework for humanoid control, wi
 
 ## Install
 
-### 1. Install Basic System Dependencies
-
-On a fresh Ubuntu machine, install Python, pip, and curl first:
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-pip python-is-python3 curl
-```
-
-### 2. Install uv
+### 1. Install uv
 
 Recommended installer:
 
@@ -46,7 +37,7 @@ python --version
 uv --version
 ```
 
-### 3. Clone and Sync UFO
+### 2. Clone and Sync UFO
 
 ```bash
 git clone https://github.com/Xuewang01/UFO.git
