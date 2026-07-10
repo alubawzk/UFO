@@ -3,12 +3,12 @@
 <p align="center">
   <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" width="420" />
 </p>
+<p align="center">
+  <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" width="420" />
+</p>
+
 UFO is an unsupervised reinforcement learning framework for humanoid control, with training, motion-data import, and inference tools for MJLab-based humanoid policies.
 
-The codebase provides two training presets in one project:
-
-- `fb`: the default forward-backward representation learning preset.
-- `tldr`: the TLDR preset for temporal latent distance reward training.
 
 ## Install
 
@@ -18,6 +18,8 @@ Run commands from the repository root:
 git clone git@github.com:Xuewang01/UFO.git
 cd UFO
 python show_help.py
+git clone https://github.com/Xuewang01/UFO.git
+cd BFMZero-mjlab
 uv sync
 ```
 
