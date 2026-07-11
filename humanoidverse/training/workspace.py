@@ -62,6 +62,21 @@ Evaluation = tp.Annotated[
 Agent = FBcprAgentConfig | FBcprAuxAgentConfig | TldrDistAuxAgentConfig
 
 
+def _trajectory_output_keys(agent: Agent) -> list[str]:
+    keys = [
+        "observation",
+        "action",
+        "z",
+        "terminated",
+        "truncated",
+        "step_count",
+        "reward",
+    ]
+    if getattr(agent, "aux_rewards", None):
+        keys.append("aux_rewards")
+    return keys
+
+
 class TrainConfig(BaseConfig):
     # The "pydantic.Field" field is used to explicitely tell which field is the discriminative
     # feature
@@ -551,17 +566,12 @@ class Workspace:
             print(f"Loaded buffer of size {len(replay_buffer['train'])}")
         else:
             if self.cfg.use_trajectory_buffer:
-                output_key_t = ["observation", "action", "z", "terminated", "truncated", "step_count", "reward"]
-                # TODO this interface should be more elegant (how to inform buffer what keys are coming in / need to be sampled?)
-                if isinstance(self.cfg.agent, (FBcprAuxAgentConfig)):
-                    output_key_t.append("aux_rewards")
-
                 replay_buffer["train"] = TrajectoryDictBufferMultiDim(
                     capacity=self.cfg.buffer_size // self.cfg.online_parallel_envs,  # make sure to divide by num_envs
                     device=self.cfg.buffer_device,
                     n_dim=2,
                     end_key="truncated",
-                    output_key_t=output_key_t,  # TODO(team): fix this. in principle we could avoid to sample qpos, qvel for training but we need them for reward evaluation
+                    output_key_t=_trajectory_output_keys(self.cfg.agent),
                     output_key_tp1=["observation", "terminated"],
                 )
             else:

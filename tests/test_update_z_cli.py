@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.train import build_ufo_mjlab_config, parse_args
+from humanoidverse.training.workspace import _trajectory_output_keys
 
 
 class UpdateZCliTest(unittest.TestCase):
@@ -44,6 +45,19 @@ class UpdateZCliTest(unittest.TestCase):
             agent="tldr",
         )
         self.assertEqual(cfg.agent.train.update_z_every_step, 10)
+
+    def test_tldr_trajectory_buffer_keeps_aux_rewards(self) -> None:
+        selected = build_agent_preset(
+            agent="tldr",
+            device="cpu",
+            compile=False,
+            update_z_every_step=10,
+            lr_scale=1.0,
+            clip_grad_norm=0.0,
+            cartwheel_aux_safe=False,
+            wandb_project="test",
+        )
+        self.assertIn("aux_rewards", _trajectory_output_keys(selected["agent_cfg"]))
 
 
 if __name__ == "__main__":
