@@ -17,6 +17,10 @@ import torch
 from torch.utils._pytree import tree_map
 
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
+from humanoidverse.export_backward_encoder import (
+    UnsupportedBackwardEncoderExport,
+    export_backward_encoder_from_model,
+)
 from humanoidverse.mjlab_inference_utils import (
     MujocoQposRenderer,
     add_bool_arg,
@@ -75,7 +79,7 @@ def _tracking_z(model: torch.nn.Module, obs: Any) -> torch.Tensor:
     return model.project_z(z)
 
 
-def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
+def _export_policy_model(model: torch.nn.Module, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_name = model.__class__.__name__
     output_name = f"{model_name}.onnx"
@@ -89,6 +93,14 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
         use_29dof=True,
     )
     print(f"[INFO] Exported model to {output_dir / output_name}")
+
+
+def _export_tracking_onnx(model: torch.nn.Module, output_dir: Path) -> None:
+    _export_policy_model(model, output_dir)
+    try:
+        export_backward_encoder_from_model(model, output_dir / "backward_encoder.onnx")
+    except UnsupportedBackwardEncoderExport as exc:
+        print(f"[INFO] Skip backward encoder ONNX export: {exc}")
 
 
 def _resolve_tracking_robot_config(
@@ -146,7 +158,7 @@ def run_tracking_inference(
     if export_onnx and num_dof != 29:
         raise ValueError("ONNX export currently supports only G1 29-DOF policies; rerun with --no-export-onnx for other robots.")
     if export_onnx:
-        _export_model(model, model_folder / "exported")
+        _export_tracking_onnx(model, model_folder / "exported")
 
     env_cfg, use_root_height_obs = load_mjlab_env_cfg(
         model_folder,
