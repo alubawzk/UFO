@@ -182,6 +182,11 @@ MuJoCo XML still defines qpos/qvel/action layout and actuator order. See
      --fps 50
    ```
 
+   Headerless RobotState CSV files are accepted. Without a header, columns are
+   interpreted as `root_pos` xyz, `root_quat` xyzw, then DOF positions in the
+   robot XML/control-joint order; an optional leading `time` column is also
+   accepted.
+
 4. Build the full inference pickle, clipped training pickle, and data manifest:
 
    ```bash
