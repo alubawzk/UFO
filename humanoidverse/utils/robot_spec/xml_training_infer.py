@@ -12,6 +12,8 @@ from typing import Any, Iterable
 
 import mujoco
 
+from humanoidverse.utils.robot_spec.urdf_training_infer import UrdfJointInfo, UrdfRobotInfo
+
 
 def _mj_name(model: mujoco.MjModel, obj_type: mujoco.mjtObj, obj_id: int) -> str:
     name = mujoco.mj_id2name(model, obj_type, int(obj_id))
@@ -174,6 +176,249 @@ def infer_actuator_limits_from_xml(
     return effort_limits, velocity_limits, actuator_joints, warnings
 
 
+def _positive(value: float | None) -> bool:
+    return value is not None and float(value) > 0.0
+
+
+def _xml_effort_limit_for_joint(model: mujoco.MjModel, joint_name: str) -> tuple[float | None, str | None]:
+    actuator_id = _actuator_for_joint(model, joint_name)
+    if actuator_id is None:
+        return None, None
+    force_range = [float(v) for v in model.actuator_forcerange[actuator_id].tolist()]
+    if bool(model.actuator_forcelimited[actuator_id]) and force_range[0] != force_range[1]:
+        return max(abs(force_range[0]), abs(force_range[1])), "XML actuator forcerange"
+    ctrl_range = [float(v) for v in model.actuator_ctrlrange[actuator_id].tolist()]
+    if bool(model.actuator_ctrllimited[actuator_id]) and ctrl_range[0] != ctrl_range[1]:
+        return max(abs(ctrl_range[0]), abs(ctrl_range[1])), "XML actuator ctrlrange"
+    return None, None
+
+
+def _xml_dof_value(model: mujoco.MjModel, joint_name: str, values, default: float) -> float:
+    joint_id = _joint_id_map(model)[joint_name]
+    dof_addr = int(model.jnt_dofadr[joint_id])
+    if dof_addr < 0:
+        return float(default)
+    return float(values[dof_addr])
+
+
+def _urdf_joint_for_xml_joint(
+    urdf_info: UrdfRobotInfo,
+    xml_joint_name: str,
+    joint_name_map: dict[str, str] | None,
+) -> tuple[str | None, UrdfJointInfo | None]:
+    mapped_name = (joint_name_map or {}).get(xml_joint_name, xml_joint_name)
+    joint = urdf_info.joints.get(mapped_name)
+    return mapped_name, joint
+
+
+def _urdf_semantic_hints_for_joints(urdf_info: UrdfRobotInfo, urdf_joint_names: list[str]) -> dict[str, dict[str, list[str]]]:
+    joint_hints: dict[str, list[str]] = {}
+    link_hints: dict[str, list[str]] = {}
+    for joint_name in _ordered_unique(urdf_joint_names):
+        joint = urdf_info.joints.get(joint_name)
+        if joint is None:
+            continue
+        if joint.semantic_hints:
+            joint_hints[joint_name] = list(joint.semantic_hints)
+        for link_name in (joint.parent, joint.child):
+            if link_name is None:
+                continue
+            link = urdf_info.links.get(link_name)
+            if link is not None and link.semantic_hints:
+                link_hints[link_name] = list(link.semantic_hints)
+    return {"joints": joint_hints, "links": link_hints}
+
+
+def _right_counterpart_name(name: str) -> str | None:
+    lower = name.lower()
+    replacements = (
+        ("left_", "right_"),
+        ("l_", "r_"),
+        ("_left_", "_right_"),
+        ("_l_", "_r_"),
+    )
+    for old, new in replacements:
+        if old in lower:
+            start = lower.index(old)
+            return name[:start] + new + name[start + len(old) :]
+    if lower.startswith("left"):
+        return "right" + name[4:]
+    return None
+
+
+def build_symmetric_dofs_idx_draft(control_joints: list[str]) -> tuple[dict[str, Any], list[str]]:
+    index_by_name = {name: idx for idx, name in enumerate(control_joints)}
+    pairs: list[list[str]] = []
+    index_pairs: list[list[int]] = []
+    unmatched: list[str] = []
+    for joint_name in control_joints:
+        if not _is_left(joint_name):
+            continue
+        counterpart = _right_counterpart_name(joint_name)
+        if counterpart is None or counterpart not in index_by_name:
+            unmatched.append(joint_name)
+            continue
+        pairs.append([joint_name, counterpart])
+        index_pairs.append([index_by_name[joint_name], index_by_name[counterpart]])
+    warnings: list[str] = []
+    if not pairs:
+        warnings.append("Could not infer any left/right symmetric DOF pairs from XML control_joint_names.")
+    if unmatched:
+        warnings.append(f"Could not infer right-side symmetric counterparts for joints: {unmatched}")
+    return {"pairs": pairs, "index_pairs": index_pairs, "unmatched_left_joints": unmatched}, warnings
+
+
+def merge_xml_urdf_training_hints(
+    *,
+    xml_model: mujoco.MjModel,
+    xml_control_joints: list[str],
+    urdf_info: UrdfRobotInfo,
+    joint_name_map: dict[str, str] | None = None,
+    prefer_urdf_limits: bool = False,
+    prefer_urdf_dynamics: bool = True,
+    effort_limit_default: float = 80.0,
+    velocity_limit_default: float = 20.0,
+    armature_default: float = 0.01,
+    friction_default: float = 0.0,
+    emit_symmetry_draft: bool = True,
+    range_warning_threshold: float = 1.0e-4,
+) -> dict[str, Any]:
+    """Merge optional URDF hints without changing XML-controlled layout."""
+
+    joint_ids = _joint_id_map(xml_model)
+    joint_ranges: dict[str, list[float]] = {}
+    lower: list[float] = []
+    upper: list[float] = []
+    effort_limits: list[float] = []
+    velocity_limits: list[float] = []
+    actuator_joints: dict[str, dict[str, float]] = {}
+    warnings: list[str] = [
+        *urdf_info.warnings,
+        "MuJoCo XML remains the source of truth for qpos/qvel/action layout and actuator order; URDF is used only for auxiliary draft hints.",
+    ]
+    matched_urdf_joints: list[str] = []
+
+    for joint_name in xml_control_joints:
+        joint_id = joint_ids[joint_name]
+        urdf_joint_name, urdf_joint = _urdf_joint_for_xml_joint(urdf_info, joint_name, joint_name_map)
+        if urdf_joint is None:
+            warnings.append(f"No URDF joint match for XML control joint {joint_name!r}; XML/default hints are used.")
+        else:
+            matched_urdf_joints.append(str(urdf_joint_name))
+
+        xml_limited = bool(xml_model.jnt_limited[joint_id])
+        xml_lo = float(xml_model.jnt_range[joint_id, 0]) if xml_limited else -3.141592653589793
+        xml_hi = float(xml_model.jnt_range[joint_id, 1]) if xml_limited else 3.141592653589793
+        urdf_has_range = urdf_joint is not None and urdf_joint.limit_lower is not None and urdf_joint.limit_upper is not None
+        if prefer_urdf_limits and urdf_has_range:
+            urdf_lo = float(urdf_joint.limit_lower)
+            urdf_hi = float(urdf_joint.limit_upper)
+            if xml_limited and (abs(xml_lo - urdf_lo) > range_warning_threshold or abs(xml_hi - urdf_hi) > range_warning_threshold):
+                warnings.append(
+                    f"URDF limits for {joint_name!r} differ from XML limits: XML=({xml_lo}, {xml_hi}), "
+                    f"URDF=({urdf_lo}, {urdf_hi}); using URDF because prefer_urdf_limits=True."
+                )
+            lo, hi = urdf_lo, urdf_hi
+        elif xml_limited:
+            lo, hi = xml_lo, xml_hi
+            if urdf_has_range and (abs(xml_lo - float(urdf_joint.limit_lower)) > range_warning_threshold or abs(xml_hi - float(urdf_joint.limit_upper)) > range_warning_threshold):
+                warnings.append(
+                    f"URDF limits for {joint_name!r} differ from XML limits; keeping XML limits because MuJoCo XML is the default source of truth."
+                )
+        elif urdf_has_range:
+            lo, hi = float(urdf_joint.limit_lower), float(urdf_joint.limit_upper)
+            warnings.append(f"Joint {joint_name!r} has no XML range; using URDF limits from {urdf_joint_name!r}.")
+        else:
+            lo, hi = xml_lo, xml_hi
+            warnings.append(f"Joint {joint_name!r} has no XML or URDF range; using [-pi, pi] draft limits.")
+        joint_ranges[joint_name] = [lo, hi]
+        lower.append(lo)
+        upper.append(hi)
+
+        xml_effort, xml_effort_source = _xml_effort_limit_for_joint(xml_model, joint_name)
+        if urdf_joint is not None and _positive(urdf_joint.limit_effort):
+            effort = float(urdf_joint.limit_effort)
+            warnings.append(f"Joint {joint_name!r} effort_limit from URDF joint {urdf_joint_name!r}.")
+        elif xml_effort is not None and xml_effort > 0.0:
+            effort = float(xml_effort)
+            if xml_effort_source == "XML actuator ctrlrange":
+                warnings.append(f"Joint {joint_name!r} actuator has no force range; using ctrlrange as draft effort_limit.")
+        else:
+            effort = float(effort_limit_default)
+            warnings.append(f"Joint {joint_name!r} has no URDF/XML effort limit; using effort_limit_default={effort_limit_default}.")
+        effort_limits.append(effort)
+
+        if urdf_joint is not None and _positive(urdf_joint.limit_velocity):
+            velocity = float(urdf_joint.limit_velocity)
+            warnings.append(f"Joint {joint_name!r} velocity_limit from URDF joint {urdf_joint_name!r}.")
+        else:
+            velocity = float(velocity_limit_default)
+            warnings.append(f"Joint {joint_name!r} has no URDF velocity limit; using velocity_limit_default={velocity_limit_default}.")
+        velocity_limits.append(velocity)
+
+        armature = _xml_dof_value(xml_model, joint_name, xml_model.dof_armature, armature_default)
+        if armature == 0.0:
+            armature = float(armature_default)
+            warnings.append(f"Joint {joint_name!r} has zero XML armature; using armature_default={armature_default}.")
+        xml_friction = _xml_dof_value(xml_model, joint_name, xml_model.dof_frictionloss, friction_default)
+        xml_damping = _xml_dof_value(xml_model, joint_name, xml_model.dof_damping, 0.0)
+        if prefer_urdf_dynamics and urdf_joint is not None and urdf_joint.dynamics_friction is not None:
+            friction = float(urdf_joint.dynamics_friction)
+            warnings.append(f"Joint {joint_name!r} friction from URDF dynamics.")
+        else:
+            friction = float(xml_friction)
+            if friction == 0.0 and friction_default != 0.0:
+                friction = float(friction_default)
+                warnings.append(f"Joint {joint_name!r} has zero XML frictionloss; using friction_default={friction_default}.")
+        if prefer_urdf_dynamics and urdf_joint is not None and urdf_joint.dynamics_damping is not None:
+            physical_damping = float(urdf_joint.dynamics_damping)
+            warnings.append(f"Joint {joint_name!r} physical damping from URDF dynamics.")
+        else:
+            physical_damping = float(xml_damping)
+
+        actuator_joints[joint_name] = {
+            "effort_limit": effort,
+            "velocity_limit": velocity,
+            "armature": float(armature),
+            "friction": float(friction),
+            "damping": float(physical_damping),
+        }
+
+    symmetric_draft: dict[str, Any] | None = None
+    if emit_symmetry_draft:
+        symmetric_draft, symmetry_warnings = build_symmetric_dofs_idx_draft(xml_control_joints)
+        warnings.extend(symmetry_warnings)
+        warnings.append("symmetric_dofs_idx is emitted as draft metadata only; current training/inference does not consume it.")
+
+    return {
+        "joint_ranges": joint_ranges,
+        "lower_upper": [lower, upper],
+        "effort_limits": effort_limits,
+        "velocity_limits": velocity_limits,
+        "actuator_joints": actuator_joints,
+        "warnings": warnings,
+        "metadata": {
+            "urdf_source": urdf_info.source_path,
+            "matched_urdf_joints": _ordered_unique(matched_urdf_joints),
+            "semantic_hints": _urdf_semantic_hints_for_joints(urdf_info, matched_urdf_joints),
+            "merge_policy": {
+                "source_of_truth": "mujoco_xml",
+                "urdf_used_for": [
+                    "effort_limit",
+                    "velocity_limit",
+                    "damping",
+                    "friction",
+                    "semantic_hints",
+                    "symmetric_dofs_idx_draft",
+                ],
+                "prefer_urdf_limits": bool(prefer_urdf_limits),
+                "prefer_urdf_dynamics": bool(prefer_urdf_dynamics),
+            },
+            "symmetric_dofs_idx_draft": symmetric_draft,
+        },
+    }
+
+
 def _keyframe_qpos(model: mujoco.MjModel, keyframe_names: tuple[str, ...]) -> tuple[list[float], str | None]:
     requested = [name for name in keyframe_names if name]
     for preferred in requested:
@@ -321,6 +566,11 @@ def build_robot_training_yaml_draft(
     friction_default: float = 0.0,
     pd_template: str = "humanoid",
     review_status: str = "draft",
+    urdf_info: UrdfRobotInfo | None = None,
+    urdf_joint_name_map: dict[str, str] | None = None,
+    prefer_urdf_limits: bool = False,
+    prefer_urdf_dynamics: bool = True,
+    emit_symmetry_draft: bool = True,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     control_joints, control_warnings = infer_control_joints_from_xml(model)
@@ -341,17 +591,40 @@ def build_robot_training_yaml_draft(
     key_bodies = _ordered_unique([base_body, merged_semantics.get("torso_name", ""), *(merged_semantics.get("feet") or []), *(merged_semantics.get("hands") or [])])
     if semantics and semantics.get("key_bodies"):
         key_bodies = list(semantics["key_bodies"])
-    _joint_ranges, range_warnings, _lower_upper = infer_joint_ranges_from_xml(model, control_joints)
-    warnings.extend(range_warnings)
-    effort_limits, velocity_limits, actuator_joints, actuator_warnings = infer_actuator_limits_from_xml(
-        model,
-        control_joints,
-        effort_limit_default=effort_limit_default,
-        velocity_limit_default=velocity_limit_default,
-        armature_default=armature_default,
-        friction_default=friction_default,
-    )
-    warnings.extend(actuator_warnings)
+    urdf_metadata: dict[str, Any] = {}
+    if urdf_info is not None:
+        merged_hints = merge_xml_urdf_training_hints(
+            xml_model=model,
+            xml_control_joints=control_joints,
+            urdf_info=urdf_info,
+            joint_name_map=urdf_joint_name_map,
+            prefer_urdf_limits=prefer_urdf_limits,
+            prefer_urdf_dynamics=prefer_urdf_dynamics,
+            effort_limit_default=effort_limit_default,
+            velocity_limit_default=velocity_limit_default,
+            armature_default=armature_default,
+            friction_default=friction_default,
+            emit_symmetry_draft=emit_symmetry_draft,
+        )
+        joint_ranges = dict(merged_hints["joint_ranges"])
+        effort_limits = list(merged_hints["effort_limits"])
+        velocity_limits = list(merged_hints["velocity_limits"])
+        actuator_joints = dict(merged_hints["actuator_joints"])
+        warnings.extend(list(merged_hints["warnings"]))
+        urdf_metadata = dict(merged_hints["metadata"])
+        urdf_metadata["merged_joint_ranges"] = joint_ranges
+    else:
+        joint_ranges, range_warnings, _lower_upper = infer_joint_ranges_from_xml(model, control_joints)
+        warnings.extend(range_warnings)
+        effort_limits, velocity_limits, actuator_joints, actuator_warnings = infer_actuator_limits_from_xml(
+            model,
+            control_joints,
+            effort_limit_default=effort_limit_default,
+            velocity_limit_default=velocity_limit_default,
+            armature_default=armature_default,
+            friction_default=friction_default,
+        )
+        warnings.extend(actuator_warnings)
     default_angles, init_state, pose_warnings = infer_default_pose_from_xml(
         model,
         control_joints,
@@ -364,8 +637,17 @@ def build_robot_training_yaml_draft(
         warnings.append(f"actuator.source={actuator_source!r} was requested; non-yaml sources are not recommended for new robots.")
     if len(merged_semantics.get("contact_bodies") or []) < 2:
         warnings.append("contact_bodies has fewer than two entries; smoke may run but biped auxiliary rewards can require manual contact body setup.")
-    warnings.append("symmetric_dofs_idx was not generated because reliable symmetry inference is robot-specific.")
+    if urdf_info is None:
+        warnings.append("symmetric_dofs_idx was not generated because reliable symmetry inference is robot-specific.")
     warnings.append("This config is XML-derived draft output. Review semantic fields, PD gains, default pose, actuator parameters, contact bodies, and reward/termination-related fields before formal training.")
+    metadata = {
+        "generated_from_xml": str(xml_path),
+        "generated_by": "humanoidverse.tools.robot_inspect",
+        "review_status": review_status,
+        "warnings": _ordered_unique(warnings),
+    }
+    if urdf_metadata:
+        metadata.update(urdf_metadata)
     return {
         "name": name,
         "xml_path": str(xml_path),
@@ -407,12 +689,7 @@ def build_robot_training_yaml_draft(
                 "joints": actuator_joints,
             },
         },
-        "metadata": {
-            "generated_from_xml": str(xml_path),
-            "generated_by": "humanoidverse.tools.robot_inspect",
-            "review_status": review_status,
-            "warnings": _ordered_unique(warnings),
-        },
+        "metadata": metadata,
     }
 
 
@@ -427,6 +704,29 @@ def _suffix_pattern(values: list[str], suffix: str) -> str:
     return _first_or_empty(values)
 
 
+def _strip_side_prefix(name: str) -> str:
+    lower = name.lower()
+    for prefix in ("left_", "right_", "l_", "r_"):
+        if lower.startswith(prefix):
+            return name[len(prefix) :]
+    if lower.startswith("left"):
+        return name[4:].lstrip("_")
+    if lower.startswith("right"):
+        return name[5:].lstrip("_")
+    return name
+
+
+def _common_side_suffix(values: list[str], fallback_suffix: str) -> str:
+    sided = [value for value in values if _is_left(value) or _is_right(value)]
+    if len(sided) < 2:
+        return _suffix_pattern(values, fallback_suffix)
+    stripped = [_strip_side_prefix(value) for value in sided]
+    first = stripped[0]
+    if first and all(value == first for value in stripped):
+        return first
+    return _suffix_pattern(values, fallback_suffix)
+
+
 def build_hydra_robot_config_draft(
     *,
     model: mujoco.MjModel,
@@ -439,8 +739,14 @@ def build_hydra_robot_config_draft(
     training = dict(robot_config["training"])
     semantics = dict(training["semantics"])
     groups = infer_dof_groups_from_names(control_joints)
-    _joint_ranges, _range_warnings, lower_upper = infer_joint_ranges_from_xml(model, control_joints)
-    lower, upper = lower_upper
+    metadata = dict(robot_config.get("metadata") or {})
+    merged_joint_ranges = metadata.get("merged_joint_ranges") if isinstance(metadata.get("merged_joint_ranges"), dict) else None
+    if merged_joint_ranges:
+        lower = [float(merged_joint_ranges[name][0]) for name in control_joints]
+        upper = [float(merged_joint_ranges[name][1]) for name in control_joints]
+    else:
+        _joint_ranges, _range_warnings, lower_upper = infer_joint_ranges_from_xml(model, control_joints)
+        lower, upper = lower_upper
     stiffness = dict(training["control"]["stiffness"])
     damping = dict(training["control"]["damping"])
     integral = {joint: 0.0 for joint in control_joints}
@@ -450,6 +756,25 @@ def build_hydra_robot_config_draft(
     left_contact = next((name for name in contact_bodies if _is_left(name)), _first_or_empty(contact_bodies))
     right_contact = next((name for name in contact_bodies if _is_right(name)), contact_bodies[1] if len(contact_bodies) > 1 else _first_or_empty(contact_bodies))
     knee_names = list(groups["knee_dof_names"])
+    urdf_assisted = bool(metadata.get("urdf_source"))
+    foot_name = _common_side_suffix(contact_bodies, "ankle") if urdf_assisted else (_suffix_pattern(contact_bodies, "foot") or _suffix_pattern(contact_bodies, "ankle"))
+    knee_body_names = [name for name in body_names if "knee" in name.lower()]
+    knee_name = _common_side_suffix(knee_body_names, "knee") if urdf_assisted else _suffix_pattern(knee_names, "knee")
+    robot_metadata = {
+        "generated_by": "humanoidverse.tools.robot_inspect",
+        "review_status": review_status,
+        "warnings": [
+            "AUTO-GENERATED DRAFT. REVIEW BEFORE TRAINING.",
+            f"PD gains generated from {pd_template!r} draft template.",
+        ],
+    }
+    if metadata.get("merge_policy"):
+        robot_metadata["merge_policy"] = metadata["merge_policy"]
+    if metadata.get("symmetric_dofs_idx_draft"):
+        robot_metadata["symmetric_dofs_idx_draft"] = metadata["symmetric_dofs_idx_draft"]
+        robot_metadata["warnings"].append("symmetric_dofs_idx is emitted as draft metadata only; current training/inference does not consume it.")
+    else:
+        robot_metadata["warnings"].append("symmetric_dofs_idx was not generated because reliable symmetry inference is robot-specific.")
     randomize = [
         name for name in body_names if _contains_any(name, ("pelvis", "hip", "thigh", "torso", "trunk", "waist", "knee"))
     ][:12]
@@ -468,8 +793,8 @@ def build_hydra_robot_config_draft(
             "num_feet": len(contact_bodies),
             "right_foot_name": right_contact,
             "left_foot_name": left_contact,
-            "foot_name": _suffix_pattern(contact_bodies, "foot") or _suffix_pattern(contact_bodies, "ankle"),
-            "knee_name": _suffix_pattern(knee_names, "knee"),
+            "foot_name": foot_name,
+            "knee_name": knee_name,
             "has_torso": bool(semantics.get("torso_name")),
             "torso_name": str(semantics.get("torso_name") or robot_config.get("base_body")),
             "dof_names": control_joints,
@@ -551,14 +876,6 @@ def build_hydra_robot_config_draft(
                 "standardize_motion_length_value": 10,
                 "reverse_motion": False,
             },
-            "metadata": {
-                "generated_by": "humanoidverse.tools.robot_inspect",
-                "review_status": review_status,
-                "warnings": [
-                    "AUTO-GENERATED DRAFT. REVIEW BEFORE TRAINING.",
-                    f"PD gains generated from {pd_template!r} draft template.",
-                    "symmetric_dofs_idx was not generated because reliable symmetry inference is robot-specific.",
-                ],
-            },
+            "metadata": robot_metadata,
         },
     }

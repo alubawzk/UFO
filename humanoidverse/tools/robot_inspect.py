@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from loguru import logger
 from omegaconf import OmegaConf
 
 from humanoidverse.utils.robot_spec import load_robot_spec, load_robot_training_spec
+from humanoidverse.utils.robot_spec.urdf_training_infer import UrdfRobotInfo, parse_urdf_robot
 from humanoidverse.utils.robot_spec.xml_training_infer import build_hydra_robot_config_draft, build_robot_training_yaml_draft
 
 
@@ -148,6 +150,34 @@ def _parse_csv_list(value: str | None) -> list[str] | None:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected true/false value, got {value!r}")
+
+
+def _load_urdf_joint_name_map(path: str | Path | None) -> dict[str, str] | None:
+    if path is None:
+        return None
+    map_path = Path(path).expanduser()
+    if not map_path.exists():
+        raise FileNotFoundError(f"URDF joint name map does not exist: {map_path}")
+    if map_path.suffix.lower() == ".json":
+        data = json.loads(map_path.read_text())
+    else:
+        data = yaml.safe_load(map_path.read_text())
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError("--urdf-joint-name-map must contain a mapping of XML joint name to URDF joint name")
+    return {str(key): str(value) for key, value in data.items()}
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -267,6 +297,8 @@ def write_robot_training_yaml(
     *,
     hydra_robot: str,
     args: argparse.Namespace,
+    urdf_info: UrdfRobotInfo | None = None,
+    urdf_joint_name_map: dict[str, str] | None = None,
 ) -> Path:
     path = Path(out_path).expanduser()
     config = build_robot_training_yaml_draft(
@@ -286,6 +318,11 @@ def write_robot_training_yaml(
         friction_default=args.friction_default,
         pd_template=args.pd_template,
         review_status=args.review_status,
+        urdf_info=urdf_info,
+        urdf_joint_name_map=urdf_joint_name_map,
+        prefer_urdf_limits=bool(args.prefer_urdf_limits),
+        prefer_urdf_dynamics=bool(args.prefer_urdf_dynamics),
+        emit_symmetry_draft=bool(args.emit_symmetry_draft),
     )
     _save_yaml(path, config, force=bool(args.force))
     load_robot_training_spec(path)
@@ -324,6 +361,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--with-training", action="store_true", help="Also write a draft training section into the Robot YAML.")
     parser.add_argument("--hydra-out", default=None, help="Output path for an auto-generated Hydra robot config draft.")
     parser.add_argument("--hydra-robot", default=None, help="Existing Hydra robot group, required with --with-training when --hydra-out is omitted.")
+    parser.add_argument("--urdf", default=None, help="Optional URDF used only to enrich draft hardware limits, dynamics, and semantic hints.")
+    parser.add_argument("--urdf-joint-name-map", default=None, help="Optional YAML/JSON mapping from XML joint names to URDF joint names.")
+    parser.add_argument("--prefer-urdf-limits", nargs="?", const=True, default=False, type=_parse_bool, help="Allow URDF joint lower/upper limits to override XML limits with warnings. Default: false.")
+    parser.add_argument("--prefer-urdf-dynamics", nargs="?", const=True, default=True, type=_parse_bool, help="Prefer URDF dynamics damping/friction when available. Default: true.")
+    parser.add_argument("--emit-symmetry-draft", nargs="?", const=True, default=True, type=_parse_bool, help="Emit left/right symmetric DOF pairs as draft metadata. Default: true.")
     parser.add_argument("--default-keyframe", default="stand", help="Preferred MuJoCo keyframe name for default pose inference.")
     parser.add_argument("--actuator-source", default="yaml", choices=["yaml", "g1_mode15", "g1-mode_15"])
     parser.add_argument("--action-scale", type=float, default=0.25)
@@ -346,6 +388,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.actuator_source != "yaml":
         logger.warning("Non-yaml actuator sources are legacy/G1-specific. Use --actuator-source yaml for new robots.")
 
+    urdf_info = parse_urdf_robot(args.urdf) if args.urdf is not None else None
+    urdf_joint_name_map = _load_urdf_joint_name_map(args.urdf_joint_name_map)
+    if args.urdf is not None and not args.with_training:
+        logger.warning("--urdf was provided without --with-training/--hydra-out; XML-only Robot YAML output is unchanged.")
+
     inspection = inspect_mujoco_xml(args.xml, name=args.name)
     semantics = infer_robot_semantics(
         inspection,
@@ -355,7 +402,15 @@ def main(argv: list[str] | None = None) -> None:
         key_bodies=_parse_csv_list(args.key_bodies),
     )
     if args.with_training:
-        out_path = write_robot_training_yaml(args.out, inspection, semantics, hydra_robot=args.hydra_robot, args=args)
+        out_path = write_robot_training_yaml(
+            args.out,
+            inspection,
+            semantics,
+            hydra_robot=args.hydra_robot,
+            args=args,
+            urdf_info=urdf_info,
+            urdf_joint_name_map=urdf_joint_name_map,
+        )
     else:
         out_path = write_robot_yaml(
             args.out,

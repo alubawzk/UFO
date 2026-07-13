@@ -45,6 +45,15 @@ bodies, default pose, PD gains, actuator parameters, and reward/termination
 fields. Generated configs are marked `metadata.review_status: draft`. Formal
 experiments should use curated robot configs.
 
+Optional URDF assistance can be enabled with `--urdf /path/to/robot.urdf`. XML
+still controls the MuJoCo layout: qpos/qvel order, actuator order, action
+dimension, control joint names, and body names are not taken from URDF. URDF is
+used only to fill draft hardware hints such as effort, velocity, physical
+damping/friction, semantic name hints, and a metadata-only symmetric DOF pair
+draft. If XML and URDF joint limits conflict, XML wins by default and the tool
+emits a warning. Use `--urdf-joint-name-map` when XML and URDF joint names do not
+match exactly.
+
 1. Generate a draft robot config from a MuJoCo XML:
 
 ```bash

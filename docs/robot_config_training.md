@@ -46,6 +46,31 @@ The result is marked `metadata.review_status: draft`; review semantic body
 groups, contact bodies, default pose, PD gains, actuator parameters, and
 reward/termination-related fields before formal training.
 
+If a matching URDF is available, pass it as optional auxiliary input:
+
+```bash
+uv run python -m humanoidverse.tools.robot_inspect \
+  --xml /path/to/robot.xml \
+  --urdf /path/to/robot.urdf \
+  --name my_robot \
+  --out configs/robots/my_robot.yaml \
+  --hydra-out humanoidverse/config/robot/my_robot/my_robot_auto.yaml
+```
+
+The MuJoCo XML remains the source of truth for qpos/qvel layout, actuator
+order, action dimension, control joint names, and body names. URDF is used only
+to enrich the draft with hardware limits and dynamics that are often absent or
+less explicit in MJCF: effort, velocity, joint dynamics damping/friction,
+semantic name hints, and a left/right symmetric DOF pair draft stored under
+metadata. When XML and URDF joint position limits differ, XML limits are kept by
+default and a warning is emitted. `--prefer-urdf-limits true` can override that
+policy for draft generation, but the resulting config still needs manual review.
+
+Use `--urdf-joint-name-map path.yaml` or `.json` when XML control joint names do
+not exactly match URDF joint names. The mapping direction is XML joint name to
+URDF joint name. The generated `symmetric_dofs_idx_draft` is metadata only; the
+current training and inference path does not consume it automatically.
+
 Example smoke command:
 
 ```bash
