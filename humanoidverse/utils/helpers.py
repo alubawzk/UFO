@@ -237,52 +237,184 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
         return max_local_self_obs, ref_dict
 
 
-def export_meta_policy_as_onnx(inference_model, path, exported_policy_name, example_obs_dict, z_dim, history: bool = False, use_29dof: bool = True):
+_SUPPORTED_POLICY_ACTOR_INPUT_KEYS = ("state", "last_action", "history_actor")
+
+
+def _as_actor_input_keys(raw_keys: Any) -> list[str]:
+    if isinstance(raw_keys, str):
+        keys = [raw_keys]
+    else:
+        try:
+            keys = [str(key) for key in raw_keys]
+        except TypeError as exc:
+            raise TypeError("cfg.archi.actor.input_filter.key must be a string or sequence of strings") from exc
+    if not keys:
+        raise ValueError("cfg.archi.actor.input_filter.key must contain at least one key")
+    unsupported = [key for key in keys if key not in _SUPPORTED_POLICY_ACTOR_INPUT_KEYS]
+    if unsupported:
+        raise ValueError(
+            "Unsupported actor input key(s) for policy ONNX export: "
+            f"{unsupported}. Supported keys: {list(_SUPPORTED_POLICY_ACTOR_INPUT_KEYS)}"
+        )
+    return keys
+
+
+def _get_policy_actor_input_keys(inference_model: nn.Module) -> list[str]:
+    try:
+        raw_keys = inference_model.cfg.archi.actor.input_filter.key
+    except AttributeError as exc:
+        raise AttributeError("inference_model.cfg.archi.actor.input_filter.key is required for policy ONNX export") from exc
+    return _as_actor_input_keys(raw_keys)
+
+
+def _obs_space_mapping(inference_model: nn.Module) -> Any:
+    if not hasattr(inference_model, "obs_space"):
+        raise AttributeError("inference_model must expose obs_space for policy ONNX export")
+    obs_space = inference_model.obs_space
+    if hasattr(obs_space, "spaces"):
+        return obs_space.spaces
+    if isinstance(obs_space, dict):
+        return obs_space
+    raise TypeError(
+        "inference_model.obs_space must be a Dict-like space with a .spaces mapping "
+        f"or a dict, got {type(obs_space)}"
+    )
+
+
+def _require_1d_box_like_space(space: Any, key: str) -> int:
+    shape = getattr(space, "shape", None)
+    if shape is None:
+        raise TypeError(f"obs_space['{key}'] must be a 1D Box-like space with shape, got {type(space)}")
+    shape = tuple(shape)
+    if len(shape) != 1:
+        raise ValueError(f"obs_space['{key}'] must be 1D, got shape={shape}")
+    return int(shape[0])
+
+
+def _actor_input_dims_from_obs_space(inference_model: nn.Module, actor_input_keys: list[str]) -> dict[str, int]:
+    spaces = _obs_space_mapping(inference_model)
+    dims: dict[str, int] = {}
+    for key in actor_input_keys:
+        if key not in spaces:
+            raise KeyError(f"Actor input key '{key}' is missing from inference_model.obs_space")
+        dims[key] = _require_1d_box_like_space(spaces[key], key)
+    return dims
+
+
+def _actor_filter_output_dim(inference_model: nn.Module) -> int:
+    try:
+        output_space = inference_model._actor.input_filter.output_space
+    except AttributeError as exc:
+        raise AttributeError("inference_model._actor.input_filter.output_space is required for policy ONNX export") from exc
+    return _require_1d_box_like_space(output_space, "_actor.input_filter.output_space")
+
+
+def _policy_output_action_dim(inference_model: nn.Module) -> int:
+    if not hasattr(inference_model, "action_dim"):
+        raise AttributeError("inference_model.action_dim is required for policy ONNX export metadata")
+    return int(inference_model.action_dim)
+
+
+def _infer_policy_onnx_export_spec(inference_model: nn.Module, z_dim: int) -> dict[str, Any]:
+    actor_input_keys = _get_policy_actor_input_keys(inference_model)
+    actor_input_dims = _actor_input_dims_from_obs_space(inference_model, actor_input_keys)
+    actor_input_dim = sum(actor_input_dims.values())
+    filter_output_dim = _actor_filter_output_dim(inference_model)
+    if actor_input_dim != filter_output_dim:
+        raise ValueError(
+            "Actor input dims inferred from obs_space do not match _actor.input_filter.output_space: "
+            f"sum(actor_input_dims)={actor_input_dim}, output_space_dim={filter_output_dim}, "
+            f"actor_input_dims={actor_input_dims}"
+        )
+    return {
+        "actor_input_keys": actor_input_keys,
+        "actor_input_dims": actor_input_dims,
+        "z_dim": int(z_dim),
+        "actor_input_dim": actor_input_dim,
+        "actor_obs_dim": actor_input_dim + int(z_dim),
+        "output_action_dim": _policy_output_action_dim(inference_model),
+    }
+
+
+def export_meta_policy_as_onnx(
+    inference_model,
+    path,
+    exported_policy_name,
+    example_obs_dict: dict[str, torch.Tensor] | None = None,
+    z_dim: int | None = None,
+    *,
+    batch_size: int = 1,
+    opset_version: int = 13,
+):
     os.makedirs(path, exist_ok=True)
     path = os.path.join(path, exported_policy_name)
+    if z_dim is None:
+        try:
+            z_dim = int(inference_model.cfg.archi.z_dim)
+        except AttributeError as exc:
+            raise AttributeError("z_dim must be provided or available at inference_model.cfg.archi.z_dim") from exc
+    z_dim = int(z_dim)
+    if z_dim <= 0:
+        raise ValueError(f"z_dim must be positive, got {z_dim}")
+    export_spec = _infer_policy_onnx_export_spec(inference_model, z_dim)
     inference_model = inference_model.eval()
     actor = copy.deepcopy(inference_model).to("cpu")
 
     class PPOWrapper(nn.Module):
-        def __init__(self, actor, history):
+        def __init__(self, actor, actor_input_keys, actor_input_dims, z_dim):
             """
             model: The original PyTorch model.
             input_keys: List of input names as keys for the input dictionary.
             """
             super(PPOWrapper, self).__init__()
             self.actor = actor
-            self.history = history
+            self.actor_input_keys = list(actor_input_keys)
+            self.actor_input_dims = dict(actor_input_dims)
+            self.z_dim = int(z_dim)
 
         def forward(self, actor_obs):
             """
             Dynamically creates a dictionary from the input keys and args.
             """
-            actor_obs, ctx = actor_obs[:, :-z_dim], actor_obs[:, -z_dim:]
-            if use_29dof:
-                state_end = 64
-                action_end = state_end+29
-            else:
-                state_end = 52
-                action_end = state_end+23
-            state = actor_obs[:, :state_end]
-            last_action = actor_obs[:, state_end:(action_end)]
-            actor_dict = {
-                "state": state,
-                "last_action": last_action
-            }
-            if self.history:
-                actor_dict["history_actor"] = actor_obs[:, (action_end):]
+            actor_obs_without_z = actor_obs[:, :-self.z_dim]
+            ctx = actor_obs[:, -self.z_dim:]
+            actor_dict = {}
+            cursor = 0
+            for key in self.actor_input_keys:
+                dim = self.actor_input_dims[key]
+                actor_dict[key] = actor_obs_without_z[:, cursor : cursor + dim]
+                cursor += dim
 
             return self.actor.act(actor_dict, ctx)
 
-    wrapper = PPOWrapper(actor, history=history)
-    example_input_list = example_obs_dict["actor_obs"]
+    wrapper = PPOWrapper(
+        actor,
+        actor_input_keys=export_spec["actor_input_keys"],
+        actor_input_dims=export_spec["actor_input_dims"],
+        z_dim=export_spec["z_dim"],
+    )
+    if example_obs_dict is None:
+        example_input_list = torch.randn(int(batch_size), export_spec["actor_obs_dim"], dtype=torch.float32)
+    else:
+        if "actor_obs" not in example_obs_dict:
+            raise KeyError("example_obs_dict must contain 'actor_obs'")
+        example_input_list = example_obs_dict["actor_obs"]
+        if int(example_input_list.shape[-1]) != export_spec["actor_obs_dim"]:
+            raise ValueError(
+                "example_obs_dict['actor_obs'] has wrong last dimension: "
+                f"expected {export_spec['actor_obs_dim']}, got {int(example_input_list.shape[-1])}"
+            )
     torch.onnx.export(
         wrapper,
         example_input_list,  # Pass x1 and x2 as separate inputs
         path,
-        verbose=True,
+        verbose=False,
         input_names=["actor_obs"],  # Specify the input names
         output_names=["action"],  # Name the output
-        opset_version=13,  # Specify the opset version, if needed
+        dynamic_axes={
+            "actor_obs": {0: "batch"},
+            "action": {0: "batch"},
+        },
+        opset_version=int(opset_version),  # Specify the opset version, if needed
     )
+    return export_spec

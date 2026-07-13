@@ -7,6 +7,7 @@ motion is rendered from the configured robot MJCF with pure MuJoCo qpos playback
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -79,24 +80,41 @@ def _tracking_z(model: torch.nn.Module, obs: Any) -> torch.Tensor:
     return model.project_z(z)
 
 
-def _export_policy_model(model: torch.nn.Module, output_dir: Path) -> None:
+def _export_policy_model(model: torch.nn.Module, output_dir: Path, robot_training: Any) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_name = model.__class__.__name__
     output_name = f"{model_name}.onnx"
-    export_meta_policy_as_onnx(
+    control_joint_names = list(robot_training.robot.control_joint_names)
+    num_dof = len(control_joint_names)
+    export_metadata = export_meta_policy_as_onnx(
         model,
         output_dir,
         output_name,
-        {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
         z_dim=model.cfg.archi.z_dim,
-        history=("history_actor" in model.cfg.archi.actor.input_filter.key),
-        use_29dof=True,
     )
+    if int(export_metadata["output_action_dim"]) != num_dof:
+        raise ValueError(
+            "Policy action dim does not match robot control joint count: "
+            f"output_action_dim={export_metadata['output_action_dim']}, num_dof={num_dof}"
+        )
+    export_metadata.update(
+        {
+            "robot_name": robot_training.robot.name,
+            "robot_config_path": str(Path(robot_training.config_path).expanduser().resolve()),
+            "xml_path": str(Path(robot_training.robot.xml_path).expanduser().resolve()),
+            "num_dof": num_dof,
+            "control_joint_names": control_joint_names,
+        }
+    )
+    metadata_path = output_dir / f"{model_name}.meta.json"
+    metadata_path.write_text(json.dumps(export_metadata, indent=2, sort_keys=True) + "\n")
     print(f"[INFO] Exported model to {output_dir / output_name}")
+    print(f"[INFO] Wrote policy ONNX metadata to {metadata_path}")
+    return export_metadata
 
 
-def _export_tracking_onnx(model: torch.nn.Module, output_dir: Path) -> None:
-    _export_policy_model(model, output_dir)
+def _export_tracking_onnx(model: torch.nn.Module, output_dir: Path, robot_training: Any) -> None:
+    _export_policy_model(model, output_dir, robot_training)
     try:
         export_backward_encoder_from_model(model, output_dir / "backward_encoder.onnx")
     except UnsupportedBackwardEncoderExport as exc:
@@ -155,10 +173,8 @@ def run_tracking_inference(
     model.to(device)
     model.eval()
 
-    if export_onnx and num_dof != 29:
-        raise ValueError("ONNX export currently supports only G1 29-DOF policies; rerun with --no-export-onnx for other robots.")
     if export_onnx:
-        _export_tracking_onnx(model, model_folder / "exported")
+        _export_tracking_onnx(model, model_folder / "exported", robot_training)
 
     env_cfg, use_root_height_obs = load_mjlab_env_cfg(
         model_folder,

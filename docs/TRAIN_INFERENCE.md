@@ -65,6 +65,17 @@ uv run python -m humanoidverse.tracking_inference \
   --motion-list 20
 ```
 
+When `--export-onnx` is enabled, `tracking_inference` exports a
+robot-config-aware policy ONNX next to the checkpoint. The policy input split is
+derived from the checkpoint model's `obs_space` and actor `input_filter`, and a
+metadata JSON records the robot name, robot config path, XML path, controlled
+joints, actor input dimensions, z dimension, actor observation dimension, and
+output action dimension.
+
+The exported ONNX is tied to the checkpoint's robot, action, and observation
+dimensions. One checkpoint cannot be reused across different robots. The deploy
+branch remains G1-only unless a robot-specific deploy configuration is created.
+
 ## Goal Inference
 
 ```bash

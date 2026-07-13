@@ -220,6 +220,16 @@ Outputs are written to `<model-folder>/tracking_inference/`. Goal inference and
 reward inference remain G1-only in this release; they are not part of the
 experimental new-robot bring-up path.
 
+With `--export-onnx`, tracking inference exports a policy ONNX that is aware of
+the selected robot config by deriving actor input dimensions from the loaded
+checkpoint's `obs_space` and actor `input_filter`. A companion metadata JSON is
+written next to the ONNX with the robot config, XML path, controlled joints,
+actor input dimensions, z dimension, actor observation dimension, and output
+action dimension. The exported ONNX is tied to that checkpoint's robot, action,
+and observation dimensions; one checkpoint cannot be reused across different
+robots. The deploy branch remains G1-only unless a robot-specific deploy config
+is created.
+
 ## Documentation
 
 - [Import Wizard](docs/import_wizard.md): RobotState schemas, inspection, and data building.
