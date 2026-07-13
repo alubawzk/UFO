@@ -71,15 +71,63 @@ class DataInspection:
         return sum(item.estimated_clip_count for item in self.files)
 
 
-def _read_header_and_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+def _is_numeric_row(row: list[str]) -> bool:
+    if not row:
+        return False
+    try:
+        for value in row:
+            float(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _headerless_csv_fieldnames(path: Path, width: int, dof_count: int) -> tuple[list[str], str]:
+    root_pos = list(ROOT_POS_ALIASES[0])
+    root_quat = list(ROOT_QUAT_ALIASES[0])
+    dof_columns = [f"dof_{idx}" for idx in range(dof_count)]
+    no_time_width = len(root_pos) + len(root_quat) + dof_count
+    with_time_width = 1 + no_time_width
+    if width == no_time_width:
+        return root_pos + root_quat + dof_columns, (
+            "No CSV header detected; interpreting columns as root_pos xyz, "
+            "root_quat xyzw, and dof_0..dof_N in RobotSpec control joint order."
+        )
+    if width == with_time_width:
+        return ["time", *root_pos, *root_quat, *dof_columns], (
+            "No CSV header detected; interpreting columns as time, root_pos xyz, "
+            "root_quat xyzw, and dof_0..dof_N in RobotSpec control joint order."
+        )
+    raise ValueError(
+        f"CSV file={path} has no header and {width} columns; expected {no_time_width} "
+        f"columns without time or {with_time_width} columns with a leading time column for {dof_count} DOFs"
+    )
+
+
+def _dict_rows(fieldnames: list[str], raw_rows: list[list[str]], path: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    expected = len(fieldnames)
+    for line_no, row in enumerate(raw_rows, start=1):
+        if len(row) != expected:
+            raise ValueError(f"CSV file={path} line {line_no} has {len(row)} columns, expected {expected}")
+        rows.append(dict(zip(fieldnames, row)))
+    return rows
+
+
+def _read_header_and_rows(path: Path, robot_spec: RobotSpec) -> tuple[list[str], list[dict[str, str]], list[str]]:
     with path.open("r", newline="") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None:
-            raise ValueError(f"CSV file has no header: {path}")
-        rows = list(reader)
+        raw_rows = [row for row in csv.reader(f) if any(cell.strip() for cell in row)]
+    if not raw_rows:
+        raise ValueError(f"CSV file is empty: {path}")
+    first = raw_rows[0]
+    if _is_numeric_row(first):
+        fieldnames, note = _headerless_csv_fieldnames(path, len(first), len(robot_spec.control_joint_names))
+        return fieldnames, _dict_rows(fieldnames, raw_rows, path), [note]
+    fieldnames = [str(value) for value in first]
+    rows = _dict_rows(fieldnames, raw_rows[1:], path)
     if not rows:
         raise ValueError(f"CSV file is empty: {path}")
-    return list(reader.fieldnames), rows
+    return fieldnames, rows, []
 
 
 def _first_alias(fieldnames: list[str], aliases: list[list[str]]) -> list[str] | None:
@@ -194,8 +242,9 @@ def _inspect_csv_file(
     keep_short: bool,
     min_clip_seconds: float,
 ) -> FileInspection:
-    fieldnames, rows = _read_header_and_rows(path)
+    fieldnames, rows, reader_notes = _read_header_and_rows(path, robot_spec)
     columns, missing, notes = detect_csv_columns(fieldnames, robot_spec)
+    notes = [*reader_notes, *notes]
     motion_fps = _resolve_fps(fieldnames, rows, path, fps)
     frames = len(rows)
     return FileInspection(

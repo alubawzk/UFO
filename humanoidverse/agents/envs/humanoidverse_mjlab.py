@@ -193,6 +193,11 @@ def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | N
     config.robot.dof_effort_limit_list = list(robot_training["effort_limits"])
     config.robot.dof_effort_limit_scale = float(robot_training.get("effort_limit_scale", 1.0))
 
+    if config.robot.get("init_state") is None:
+        config.robot.init_state = OmegaConf.create({})
+    if config.robot.get("control") is None:
+        config.robot.control = OmegaConf.create({})
+
     config.robot.init_state.pos = list(robot_training["init_state"]["pos"])
     config.robot.init_state.rot = list(robot_training["init_state"]["rot"])
     config.robot.init_state.lin_vel = list(robot_training["init_state"]["lin_vel"])
@@ -205,22 +210,27 @@ def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | N
     config.robot.control.normalize_action_to = float(robot_training["normalize_action_to"])
 
     xml_path = Path(robot_info["xml_path"]).expanduser().resolve()
-    if "asset" in config.robot:
-        config.robot.asset.asset_root = str(xml_path.parent)
-        config.robot.asset.assetFileName = xml_path.name
-        config.robot.asset.xml_file = str(xml_path)
-    if "motion" in config.robot and "asset" in config.robot.motion:
-        config.robot.motion.asset.assetRoot = str(xml_path.parent)
-        config.robot.motion.asset.assetFileName = xml_path.name
-        config.robot.motion.asset.urdfFileName = None
-    if "motion" in config.robot:
-        extend_config = []
-        for item in _to_list(config.robot.motion.get("extend_config", [])):
-            parent_name = str(item.get("parent_name", ""))
-            if parent_name in body_names:
-                extend_config.append(dict(item))
-        config.robot.motion.extend_config = extend_config
-        config.robot.motion.nums_extend_bodies = len(extend_config)
+    if config.robot.get("asset") is None:
+        config.robot.asset = OmegaConf.create({})
+    config.robot.asset.asset_root = str(xml_path.parent)
+    config.robot.asset.assetFileName = xml_path.name
+    config.robot.asset.xml_file = str(xml_path)
+
+    if config.robot.get("motion") is None:
+        config.robot.motion = OmegaConf.create({})
+    if config.robot.motion.get("asset") is None:
+        config.robot.motion.asset = OmegaConf.create({})
+    config.robot.motion.asset.assetRoot = str(xml_path.parent)
+    config.robot.motion.asset.assetFileName = xml_path.name
+    config.robot.motion.asset.urdfFileName = None
+
+    extend_config = []
+    for item in _to_list(config.robot.motion.get("extend_config", [])):
+        parent_name = str(item.get("parent_name", ""))
+        if parent_name in body_names:
+            extend_config.append(dict(item))
+    config.robot.motion.extend_config = extend_config
+    config.robot.motion.nums_extend_bodies = len(extend_config)
 
 
 def _actuator_params_from_training(dof_names: tp.Sequence[str], robot_training: dict[str, Any] | None) -> tuple[str, dict[str, list[float]]]:

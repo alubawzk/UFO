@@ -8,6 +8,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
+from humanoidverse.tools.data_inspect import inspect_data_source
 from humanoidverse.utils.motion_data.adapters import (
     SUPPORTED_FORMATS,
     load_motion_data_by_format,
@@ -116,6 +117,19 @@ def _write_tiny_robot(root: Path) -> tuple[Path, Path]:
         )
     )
     return xml_path, robot_config
+
+
+def _write_headerless_robot_state_csv(path: Path, *, frames: int = 3, include_time: bool = False) -> None:
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        for idx in range(frames):
+            row: list[float] = []
+            if include_time:
+                row.append(idx * 0.02)
+            row.extend([0.0, 0.0, 1.0])
+            row.extend([0.0, 0.0, 0.0, 1.0])
+            row.extend([0.1 * idx, 0.2 * idx])
+            writer.writerow(row)
 
 
 def _write_robot_state_csv(path: Path, *, named_joints: bool = True, frames: int = 3) -> None:
@@ -279,6 +293,53 @@ class MotionDataAdapterTest(unittest.TestCase):
             self.assertIsInstance(data["state"], RobotStateMotion)
             self.assertEqual(data["state"].dof_pos.shape, (4, 2))
             self.assertAlmostEqual(data["state"].fps, 50.0)
+
+    def test_headerless_robot_state_csv_reader_defaults_to_xml_order_without_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            spec = load_robot_spec(robot_config)
+            path = root / "state.csv"
+            _write_headerless_robot_state_csv(path, frames=4, include_time=False)
+            data = read_robot_state_csv(str(path), source_name="robot_csv", robot_spec=spec, fps=50)
+            motion = data["state"]
+            self.assertEqual(motion.dof_pos.shape, (4, 2))
+            self.assertAlmostEqual(motion.fps, 50.0)
+            self.assertAlmostEqual(float(motion.dof_pos[2, 0]), 0.2)
+            self.assertAlmostEqual(float(motion.dof_pos[2, 1]), 0.4)
+            self.assertEqual(motion.metadata["columns"]["dof_pos"], "xml_order")
+
+    def test_headerless_robot_state_csv_reader_accepts_leading_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            spec = load_robot_spec(robot_config)
+            path = root / "state.csv"
+            _write_headerless_robot_state_csv(path, frames=4, include_time=True)
+            data = read_robot_state_csv(str(path), source_name="robot_csv", robot_spec=spec)
+            motion = data["state"]
+            self.assertEqual(motion.dof_pos.shape, (4, 2))
+            self.assertAlmostEqual(motion.fps, 50.0)
+            self.assertAlmostEqual(float(motion.root_pos[0, 2]), 1.0)
+
+    def test_data_inspect_accepts_headerless_robot_state_csv_without_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _, robot_config = _write_tiny_robot(root)
+            path = root / "state.csv"
+            _write_headerless_robot_state_csv(path, frames=60, include_time=False)
+            result = inspect_data_source(
+                robot_config=robot_config,
+                source=str(path),
+                fmt="robot_state_csv",
+                fps=50,
+                dataset_name="robot",
+            )
+            self.assertEqual(result.dof_pos_mode, "xml_order")
+            self.assertEqual(result.root_pos_columns, ["root_pos_x", "root_pos_y", "root_pos_z"])
+            dataset = result.suggested_manifest["datasets"][0]
+            self.assertEqual(dataset["columns"]["dof_pos"], "xml_order")
+            self.assertEqual(dataset["fps"], 50.0)
 
     def test_robot_state_npz_reader_returns_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -37,6 +37,11 @@ robot:
     # only used in manual PD control
     action_scale: 1.0
     clamp_actions: 1.0
+    action_rescale: True
+    action_clip_value: 5.0
+    normalize_action: True
+    normalize_action_from: 1.0
+    normalize_action_to: 5.0
     clip_torques: ???
 
   asset:

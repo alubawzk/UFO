@@ -31,15 +31,59 @@ def _motion_key_from_npz(value: Any) -> str:
     return str(scalar)
 
 
-def _read_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+DEFAULT_ROOT_POS_COLUMNS = ["root_pos_x", "root_pos_y", "root_pos_z"]
+DEFAULT_ROOT_QUAT_COLUMNS = ["root_quat_x", "root_quat_y", "root_quat_z", "root_quat_w"]
+
+
+def _is_numeric_row(row: list[str]) -> bool:
+    if not row:
+        return False
+    try:
+        for value in row:
+            float(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _headerless_csv_fieldnames(path: Path, width: int, dof_count: int) -> list[str]:
+    dof_columns = [f"dof_{idx}" for idx in range(dof_count)]
+    no_time_width = len(DEFAULT_ROOT_POS_COLUMNS) + len(DEFAULT_ROOT_QUAT_COLUMNS) + dof_count
+    with_time_width = 1 + no_time_width
+    if width == no_time_width:
+        return [*DEFAULT_ROOT_POS_COLUMNS, *DEFAULT_ROOT_QUAT_COLUMNS, *dof_columns]
+    if width == with_time_width:
+        return ["time", *DEFAULT_ROOT_POS_COLUMNS, *DEFAULT_ROOT_QUAT_COLUMNS, *dof_columns]
+    raise ValueError(
+        f"CSV file={path} has no header and {width} columns; expected {no_time_width} "
+        f"columns without time or {with_time_width} columns with a leading time column for {dof_count} DOFs"
+    )
+
+
+def _dict_rows(fieldnames: list[str], raw_rows: list[list[str]], path: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    expected = len(fieldnames)
+    for line_no, row in enumerate(raw_rows, start=1):
+        if len(row) != expected:
+            raise ValueError(f"CSV file={path} line {line_no} has {len(row)} columns, expected {expected}")
+        rows.append(dict(zip(fieldnames, row)))
+    return rows
+
+
+def _read_csv_rows(path: Path, robot_spec: RobotSpec) -> tuple[list[str], list[dict[str, str]], bool]:
     with path.open("r", newline="") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None:
-            raise ValueError(f"CSV file has no header: {path}")
-        rows = list(reader)
+        raw_rows = [row for row in csv.reader(f) if any(cell.strip() for cell in row)]
+    if not raw_rows:
+        raise ValueError(f"CSV file is empty: {path}")
+    first = raw_rows[0]
+    if _is_numeric_row(first):
+        fieldnames = _headerless_csv_fieldnames(path, len(first), len(robot_spec.control_joint_names))
+        return fieldnames, _dict_rows(fieldnames, raw_rows, path), True
+    fieldnames = [str(value) for value in first]
+    rows = _dict_rows(fieldnames, raw_rows[1:], path)
     if not rows:
         raise ValueError(f"CSV file is empty: {path}")
-    return list(reader.fieldnames), rows
+    return fieldnames, rows, False
 
 
 def _column_array(rows: list[dict[str, str]], column: str, path: Path) -> np.ndarray:
@@ -109,9 +153,12 @@ def read_robot_state_csv(
     columns: dict[str, Any] | None = None,
 ) -> dict[str, RobotStateMotion]:
     data: dict[str, RobotStateMotion] = {}
-    root_pos_columns, root_quat_columns, dof_spec = _robot_state_columns(columns)
+    configured_root_pos_columns, configured_root_quat_columns, configured_dof_spec = _robot_state_columns(columns)
     for path in expand_motion_paths(path_spec, base_dir=base_dir, suffix=".csv"):
-        fieldnames, rows = _read_csv_rows(path)
+        fieldnames, rows, headerless = _read_csv_rows(path, robot_spec)
+        root_pos_columns = configured_root_pos_columns
+        root_quat_columns = configured_root_quat_columns
+        dof_spec = "xml_order" if headerless and columns is None else configured_dof_spec
         root_pos = _columns_matrix(rows, root_pos_columns, path)
         root_quat = _columns_matrix(rows, root_quat_columns, path)
         joint_names: list[str] | None = None
