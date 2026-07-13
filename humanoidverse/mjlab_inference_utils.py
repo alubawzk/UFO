@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,12 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabConfig,
     G1_MJLAB_MJCF_PATH,
 )
-from humanoidverse.utils.robot_spec import load_robot_training_spec
+from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
+from humanoidverse.utils.robot_spec import (
+    assert_robot_configs_compatible,
+    load_robot_training_spec,
+    resolve_robot_config_path,
+)
 
 
 if getattr(humanoidverse, "__file__", None) is not None:
@@ -36,6 +42,7 @@ else:
     HUMANOIDVERSE_DIR = Path(__file__).resolve().parent
 
 PROJECT_ROOT = HUMANOIDVERSE_DIR.parent
+DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 DEFAULT_INFERENCE_DATA_PATH = Path("humanoidverse/data/lafan_29dof_10s-clipped.pkl")
 G1_MJLAB_DOF_NAMES = (
     "left_hip_pitch_joint",
@@ -97,6 +104,154 @@ def resolve_project_path(path: str | Path) -> Path:
     if path.is_absolute():
         return path
     return PROJECT_ROOT / path
+
+
+def add_robot_config_manifest_args(parser: argparse.ArgumentParser, *, purpose: str) -> None:
+    parser.add_argument("--robot-config", type=Path, default=None, help="Robot YAML for rollout and rendering.")
+    parser.add_argument("--data-manifest", type=Path, default=None, help=f"Motion data manifest. Use with --dataset for {purpose}.")
+    parser.add_argument("--dataset", default=None, help="Dataset name inside --data-manifest.")
+    parser.add_argument("--rebuild-motion-cache", action="store_true", help="Rebuild manifest-generated motion pkl cache.")
+
+
+def resolve_inference_robot_config(
+    cli_robot_config: str | Path | None,
+    manifest_robot_config: str | Path | None,
+) -> Path:
+    if cli_robot_config is not None and manifest_robot_config is not None:
+        return assert_robot_configs_compatible(cli_robot_config, manifest_robot_config)
+    if cli_robot_config is not None:
+        return resolve_robot_config_path(cli_robot_config)
+    if manifest_robot_config is not None:
+        return resolve_robot_config_path(manifest_robot_config)
+    return resolve_robot_config_path(DEFAULT_ROBOT_CONFIG)
+
+
+def resolve_inference_data_and_robot_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> argparse.Namespace:
+    manifest_robot_config = None
+    if args.data_manifest is not None:
+        if args.data_path is not None:
+            parser.error("--data-manifest and --data-path cannot be used together")
+        if args.dataset is None:
+            parser.error("--dataset is required when --data-manifest is provided")
+        manifest_robot_config = prepare_manifest_robot_config_path(args.data_manifest)
+        args.data_path = Path(
+            prepare_manifest_dataset_path(
+                args.data_manifest,
+                args.dataset,
+                split="inference",
+                rebuild_cache=bool(args.rebuild_motion_cache),
+            )
+        )
+    args.robot_config = resolve_inference_robot_config(args.robot_config, manifest_robot_config)
+    return args
+
+
+def _find_body(root: ET.Element, name: str) -> ET.Element | None:
+    for body in root.iter("body"):
+        if body.get("name") == name:
+            return body
+    return None
+
+
+def _first_worldbody_body(root: ET.Element) -> ET.Element | None:
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        return None
+    return worldbody.find("body")
+
+
+def _absolutize_compiler_paths(root: ET.Element, source_xml: Path) -> None:
+    compiler = root.find("compiler")
+    if compiler is None:
+        return
+    for attr in ("meshdir", "texturedir", "assetdir"):
+        raw_path = compiler.get(attr)
+        if not raw_path:
+            continue
+        asset_path = Path(raw_path)
+        if not asset_path.is_absolute():
+            compiler.set(attr, str((source_xml.parent / asset_path).resolve()))
+
+
+def write_mjlab_relabel_xml(
+    robot_xml: Path,
+    output_dir: Path,
+    control_joint_names: list[str],
+    robot_name: str,
+    *,
+    root_body_name: str | None = None,
+) -> Path:
+    """Create a relabel-only MuJoCo XML with one motor per controlled joint."""
+
+    if not control_joint_names:
+        raise ValueError("control_joint_names must contain at least one joint")
+
+    source_xml = Path(robot_xml).expanduser().resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tree = ET.parse(source_xml)
+    root = tree.getroot()
+    _absolutize_compiler_paths(root, source_xml)
+
+    pelvis_body = _find_body(root, "pelvis")
+    if pelvis_body is None and root_body_name is not None:
+        pelvis_body = _find_body(root, root_body_name)
+    if pelvis_body is None:
+        pelvis_body = _first_worldbody_body(root)
+    if pelvis_body is None:
+        raise ValueError(f"Robot XML has no worldbody body for reward relabeling: {source_xml}")
+    if pelvis_body.get("name") != "pelvis" and _find_body(root, "pelvis") is None:
+        pelvis_body.set("name", "pelvis")
+
+    site_name = "ufo_relabel_imu_site"
+    if not any(site.get("name") == site_name for site in root.iter("site")):
+        ET.SubElement(
+            pelvis_body,
+            "site",
+            {
+                "name": site_name,
+                "pos": "0 0 0",
+                "size": "0.01",
+            },
+        )
+
+    for sensor in list(root.findall("sensor")):
+        root.remove(sensor)
+    sensor_root = ET.SubElement(root, "sensor")
+    ET.SubElement(sensor_root, "subtreelinvel", {"name": "torso_link_subtreelinvel", "body": "pelvis"})
+    ET.SubElement(sensor_root, "framezaxis", {"name": "upvector_torso", "objtype": "site", "objname": site_name})
+    ET.SubElement(sensor_root, "gyro", {"name": "imu-angular-velocity", "site": site_name})
+
+    for actuator in list(root.findall("actuator")):
+        root.remove(actuator)
+    actuator_root = ET.SubElement(root, "actuator")
+    for joint_name in control_joint_names:
+        ET.SubElement(
+            actuator_root,
+            "motor",
+            {
+                "name": f"{joint_name}_motor",
+                "joint": joint_name,
+                "gear": "1",
+            },
+        )
+
+    safe_robot_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(robot_name)).strip("._") or "robot"
+    output_path = output_dir / f"{safe_robot_name}_reward_relabel.xml"
+    tree.write(output_path, encoding="utf-8", xml_declaration=False)
+
+    model = mujoco.MjModel.from_xml_path(str(output_path))
+    if int(model.nu) != len(control_joint_names):
+        raise RuntimeError(
+            f"Expected relabel XML ctrl dim {len(control_joint_names)}, got model.nu={model.nu}: {output_path}"
+        )
+    data = mujoco.MjData(model)
+    if int(data.ctrl.size) != len(control_joint_names):
+        raise RuntimeError(
+            f"Expected relabel XML data.ctrl dim {len(control_joint_names)}, got {data.ctrl.size}: {output_path}"
+        )
+    return output_path
 
 
 def write_g1_mjlab_relabel_xml(source_xml: Path, output_dir: Path) -> Path:

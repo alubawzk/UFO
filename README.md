@@ -20,6 +20,7 @@ inference, with a curated and best-tested path for Unitree G1.
 - Manifest-based, source-weighted multi-source data mixing.
 - Experimental `--robot-config` training initialization for bringing up new robots.
 - Robot-config-aware tracking inference and video export.
+- Robot-config-aware goal inference and limited reward inference bring-up paths.
 
 ## Current Support Matrix
 
@@ -29,8 +30,8 @@ inference, with a curated and best-tested path for Unitree G1.
 | Motion data: RobotState CSV / NPZ / `ufo_pkl` | Supported |
 | Multi-source data manifest | Supported |
 | Tracking inference | Robot-config aware |
-| Goal inference | G1-only |
-| Reward inference | G1-only |
+| Goal inference | Robot-config aware; non-G1 requires robot-specific goal JSON |
+| Reward inference | G1 full default tasks; non-G1 limited to root/locomotion tasks |
 | Deployment and teleoperation | Use the [`deploy` branch](https://github.com/Xuewang01/UFO/tree/deploy) / UFO-Deploy runtime |
 | Automatic motion retargeting | Not supported |
 | Cross-robot shared-policy training | Not supported |
@@ -216,9 +217,14 @@ uv run python -m humanoidverse.tracking_inference \
   --motion-list 0
 ```
 
-Outputs are written to `<model-folder>/tracking_inference/`. Goal inference and
-reward inference remain G1-only in this release; they are not part of the
-experimental new-robot bring-up path.
+Outputs are written to `<model-folder>/tracking_inference/`. Tracking, goal,
+and reward inference accept `--robot-config` and manifest-based inference data.
+Goal inference defaults to the curated G1 goal JSON for G1 checkpoints; non-G1
+goal inference requires a robot-specific `--goal-json`, because goal frames and
+joint targets are not shared across robot morphologies. Reward inference keeps
+the full default task set for G1. For non-G1 robots, the first robot-config-aware
+path is limited to rollout/relabel setup and root/locomotion tasks such as
+`move-ego-*` and `rotate-z-*` unless robot-specific reward semantics are added.
 
 With `--export-onnx`, tracking inference exports a policy ONNX that is aware of
 the selected robot config by deriving actor input dimensions from the loaded

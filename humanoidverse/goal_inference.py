@@ -19,30 +19,36 @@ from pathlib import Path
 
 import joblib
 import mediapy as media
+import numpy as np
 import torch
 from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
-from humanoidverse.agents.envs.humanoidverse_mjlab import G1_MJLAB_MJCF_PATH
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
 from humanoidverse.mjlab_inference_utils import (
     HUMANOIDVERSE_DIR,
+    MujocoQposRenderer,
+    add_robot_config_manifest_args,
     add_bool_arg,
     checkpoint_load_device,
     load_mjlab_env_cfg,
     render_policy_frame,
-    resolve_project_path,
-    MujocoQposRenderer,
+    resolve_inference_data_and_robot_args,
+    resolve_inference_robot_config,
 )
+from humanoidverse.utils.robot_spec import load_robot_training_spec
 
 
-def _find_goal_json(goal_json: Path | None) -> Path:
+def _find_goal_json(goal_json: Path | None, *, num_dof: int, robot_name: str) -> Path:
     if goal_json is not None:
         goal_json = goal_json.expanduser().resolve()
         if not goal_json.exists():
             raise FileNotFoundError(f"Missing goal JSON: {goal_json}")
         return goal_json
+
+    if int(num_dof) != 29:
+        raise ValueError("Non-G1 goal inference requires --goal-json generated for the selected robot.")
 
     candidates = [
         HUMANOIDVERSE_DIR / "data" / "robots" / "g1" / "goal_frames_lafan29dof.json",
@@ -51,7 +57,64 @@ def _find_goal_json(goal_json: Path | None) -> Path:
     for candidate in candidates:
         if candidate.exists():
             return candidate
-    raise FileNotFoundError(f"Could not find goal_frames_lafan29dof.json. Searched in: {candidates}")
+    raise FileNotFoundError(f"Could not find default G1 goal JSON for robot {robot_name}. Searched in: {candidates}")
+
+
+_GOAL_DOF_KEYS = {
+    "dof_pos",
+    "joint_pos",
+    "joint_positions",
+    "target_dof_pos",
+    "target_joint_pos",
+    "target_joint_positions",
+}
+_GOAL_QPOS_KEYS = {"qpos", "target_qpos"}
+
+
+def _numeric_last_dim(value: object) -> int | None:
+    try:
+        array = np.asarray(value)
+    except ValueError:
+        return None
+    if array.ndim == 0 or array.dtype.kind not in {"b", "i", "u", "f", "c"}:
+        return None
+    return int(array.shape[-1])
+
+
+def _validate_goal_value_dim(value: object, *, expected_dim: int, key_path: str, goal_json: Path) -> None:
+    dim = _numeric_last_dim(value)
+    if dim is not None and dim != int(expected_dim):
+        raise ValueError(f"Goal JSON {goal_json} field {key_path} expected dimension {expected_dim}, got {dim}")
+
+
+def _validate_goal_entry_dims(value: object, *, num_dof: int, goal_json: Path, key_path: str = "goal") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{key_path}.{key}"
+            if key in _GOAL_DOF_KEYS:
+                _validate_goal_value_dim(child, expected_dim=num_dof, key_path=child_path, goal_json=goal_json)
+            elif key in _GOAL_QPOS_KEYS:
+                _validate_goal_value_dim(child, expected_dim=7 + int(num_dof), key_path=child_path, goal_json=goal_json)
+            else:
+                _validate_goal_entry_dims(child, num_dof=num_dof, goal_json=goal_json, key_path=child_path)
+    elif isinstance(value, list):
+        for idx, child in enumerate(value):
+            if isinstance(child, (dict, list)):
+                _validate_goal_entry_dims(child, num_dof=num_dof, goal_json=goal_json, key_path=f"{key_path}[{idx}]")
+
+
+def load_and_validate_goal_json(goal_json: Path, *, num_dof: int) -> list[dict[str, object]]:
+    with Path(goal_json).open("r") as f:
+        goals_to_evaluate = json.load(f)
+    if not goals_to_evaluate:
+        raise RuntimeError("Goal JSON is empty.")
+    if not isinstance(goals_to_evaluate, list):
+        raise ValueError(f"Goal JSON must be a list of goal entries: {goal_json}")
+    for idx, goal in enumerate(goals_to_evaluate):
+        if not isinstance(goal, dict):
+            raise ValueError(f"Goal JSON entry #{idx} must be a mapping: {goal_json}")
+        _validate_goal_entry_dims(goal, num_dof=int(num_dof), goal_json=Path(goal_json), key_path=f"goal[{idx}]")
+    return goals_to_evaluate
 
 
 def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
@@ -66,7 +129,7 @@ def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
     print(f"[INFO] Exported model to {output_dir / f'{model_name}.onnx'}")
 
 
-def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str) -> dict[str, torch.Tensor]:
+def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str, *, num_dof: int) -> dict[str, torch.Tensor]:
     root_state_xyzw = torch.cat(
         [
             obs_dict["ref_body_pos"][0, 0],
@@ -76,7 +139,7 @@ def _target_states_from_obs(obs_dict: dict[str, torch.Tensor], device: str) -> d
         ],
         dim=-1,
     ).to(device=device, dtype=torch.float32)
-    dof_state = torch.zeros((29, 2), device=device, dtype=torch.float32)
+    dof_state = torch.zeros((int(num_dof), 2), device=device, dtype=torch.float32)
     dof_state[:, 0] = obs_dict["dof_pos"][0].to(device=device, dtype=torch.float32)
     dof_state[:, 1] = obs_dict["ref_dof_vel"][0].to(device=device, dtype=torch.float32)
     return {"root_states": root_state_xyzw.unsqueeze(0), "dof_states": dof_state.unsqueeze(0)}
@@ -86,6 +149,7 @@ def run_goal_inference(
     *,
     model_folder: Path,
     data_path: Path | None,
+    robot_config: Path | None,
     goal_json: Path | None,
     headless: bool,
     device: str,
@@ -107,9 +171,14 @@ def run_goal_inference(
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Missing checkpoint directory: {checkpoint_dir}")
 
-    G1_xml = resolve_project_path(G1_MJLAB_MJCF_PATH)
-    if not G1_xml.exists():
-        raise FileNotFoundError(f"Missing G1 XML: {G1_xml}")
+    robot_config = resolve_inference_robot_config(robot_config, None)
+    robot_training = load_robot_training_spec(robot_config)
+    robot_xml = Path(robot_training.robot.xml_path).expanduser().resolve()
+    if not robot_xml.exists():
+        raise FileNotFoundError(f"Missing robot XML: {robot_xml}")
+    control_joint_names = list(robot_training.robot.control_joint_names)
+    num_dof = len(control_joint_names)
+    goal_json_path = _find_goal_json(goal_json, num_dof=num_dof, robot_name=robot_training.robot.name)
 
     model_load_device = checkpoint_load_device(device)
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=model_load_device)
@@ -119,6 +188,7 @@ def run_goal_inference(
     env_cfg, use_root_height_obs = load_mjlab_env_cfg(
         model_folder,
         data_path=data_path,
+        robot_config=robot_config,
         device=device,
         headless=headless,
         disable_dr=disable_dr,
@@ -134,19 +204,20 @@ def run_goal_inference(
     video_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[INFO] UFO goal inference model_folder={model_folder}")
+    print(f"[INFO] Robot={robot_training.robot.name}")
+    print(f"[INFO] Robot config={Path(robot_training.config_path).expanduser().resolve()}")
+    print(f"[INFO] Robot XML={robot_xml}")
+    print(f"[INFO] num_dof={num_dof}")
     print(f"[INFO] Rollout XML={env_cfg.mjcf_path}")
     print(f"[INFO] Motion data={env_cfg.lafan_tail_path}")
-    print(f"[INFO] Goal JSON={_find_goal_json(goal_json)}")
+    print(f"[INFO] Goal JSON={goal_json_path}")
     print(f"[INFO] device={device} disable_dr={disable_dr} disable_obs_noise={disable_obs_noise} save_mp4={save_mp4}")
 
     try:
         if export_onnx:
             _export_model(model, model_folder / "exported")
 
-        with _find_goal_json(goal_json).open("r") as f:
-            goals_to_evaluate = json.load(f)
-        if not goals_to_evaluate:
-            raise RuntimeError("Goal JSON is empty.")
+        goals_to_evaluate = load_and_validate_goal_json(goal_json_path, num_dof=num_dof)
         first_goal = goals_to_evaluate[0]
 
         z_dict: dict[str, object] = {}
@@ -186,11 +257,12 @@ def run_goal_inference(
             return
 
         renderer = MujocoQposRenderer(
-            G1_xml,
+            robot_xml,
             render_size=render_size,
             camera_distance=camera_distance,
             camera_azimuth=camera_azimuth,
             camera_elevation=camera_elevation,
+            expected_qpos_size=7 + num_dof,
         )
         try:
             first_motion_id = int(first_goal["motion_id"])
@@ -201,7 +273,7 @@ def run_goal_inference(
                 use_root_height_obs=use_root_height_obs,
                 velocity_multiplier=0,
             )
-            target_states = _target_states_from_obs(first_obs_dict, device=device)
+            target_states = _target_states_from_obs(first_obs_dict, device=device, num_dof=num_dof)
             observation, _info = wrapped_env.reset(to_numpy=False, target_states=target_states)
             first_motion_name = first_goal.get("motion_name", "unknown")
             print(
@@ -241,6 +313,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UFO goal inference.")
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--data-path", type=Path, default=None)
+    add_robot_config_manifest_args(parser, purpose="goal inference")
     parser.add_argument("--goal-json", type=Path, default=None)
     add_bool_arg(parser, "--headless", True, "Run MuJoCo in headless mode.")
     parser.add_argument("--device", default="cuda:0")
@@ -256,7 +329,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=50)
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
     add_bool_arg(parser, "--export-onnx", False, "Export ONNX next to the checkpoint before inference.")
-    return parser.parse_args()
+    return resolve_inference_data_and_robot_args(parser.parse_args(), parser)
 
 
 def main() -> None:
@@ -264,6 +337,7 @@ def main() -> None:
     run_goal_inference(
         model_folder=args.model_folder,
         data_path=args.data_path,
+        robot_config=args.robot_config,
         goal_json=args.goal_json,
         headless=args.headless,
         device=args.device,

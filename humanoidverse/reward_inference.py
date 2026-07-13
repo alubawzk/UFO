@@ -14,6 +14,7 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
+import re
 import time
 from pathlib import Path
 
@@ -23,19 +24,22 @@ import torch
 
 from humanoidverse.agents.buffers.trajectory import TrajectoryDictBufferMultiDim
 from humanoidverse.agents.buffers.transition import DictBuffer
-from humanoidverse.agents.envs.humanoidverse_mjlab import G1_MJLAB_MJCF_PATH
 from humanoidverse.agents.load_utils import load_model_from_checkpoint_dir
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx
 from humanoidverse.mjlab_reward_relabel import RewardWrapperHV
 from humanoidverse.mjlab_inference_utils import (
+    MujocoQposRenderer,
+    add_robot_config_manifest_args,
     add_bool_arg,
     checkpoint_load_device,
     load_mjlab_env_cfg,
     render_policy_frame,
-    resolve_project_path,
+    resolve_inference_data_and_robot_args,
+    resolve_inference_robot_config,
+    write_mjlab_relabel_xml,
     write_g1_mjlab_relabel_xml,
-    MujocoQposRenderer,
 )
+from humanoidverse.utils.robot_spec import load_robot_training_spec
 
 
 DEFAULT_TASKS = [
@@ -78,6 +82,34 @@ DEFAULT_TASKS = [
     "crouch-0.25",
     "sitonground",
 ]
+
+NON_G1_LOCOMOTION_TASKS = [task for task in DEFAULT_TASKS if task.startswith("move-ego-") or task.startswith("rotate-z-")]
+
+
+def _is_g1_reward_robot(robot_training) -> bool:
+    return robot_training.robot.name == "g1_29dof" and len(robot_training.robot.control_joint_names) == 29
+
+
+def _is_non_g1_locomotion_task(task: str) -> bool:
+    patterns = (
+        r"^move-ego-(-?\d+\.*\d*)-(-?\d+\.*\d*)$",
+        r"^move-ego-low(-?\d+\.*\d*)-(-?\d+\.*\d*)-(-?\d+\.*\d*)$",
+        r"^rotate-z-(-?\d+\.*\d*)-(\d+\.*\d*)$",
+    )
+    return any(re.search(pattern, task) for pattern in patterns)
+
+
+def _resolve_reward_tasks(tasks: list[str] | None, robot_training) -> tuple[list[str], str]:
+    if _is_g1_reward_robot(robot_training):
+        return list(tasks or DEFAULT_TASKS), "G1 full tasks"
+
+    selected_tasks = list(tasks or NON_G1_LOCOMOTION_TASKS)
+    for task in selected_tasks:
+        if not _is_non_g1_locomotion_task(task):
+            raise ValueError(
+                f"Task {task} requires G1-style arm/body semantics and is not enabled for robot {robot_training.robot.name}."
+            )
+    return selected_tasks, "non-G1 locomotion-only tasks"
 
 
 def _export_model(model: torch.nn.Module, output_dir: Path) -> None:
@@ -153,6 +185,7 @@ def run_reward_inference(
     *,
     model_folder: Path,
     data_path: Path | None,
+    robot_config: Path | None,
     headless: bool,
     device: str,
     save_mp4: bool,
@@ -180,9 +213,15 @@ def run_reward_inference(
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Missing checkpoint directory: {checkpoint_dir}")
 
-    G1_xml = resolve_project_path(G1_MJLAB_MJCF_PATH)
-    if not G1_xml.exists():
-        raise FileNotFoundError(f"Missing G1 XML: {G1_xml}")
+    robot_config = resolve_inference_robot_config(robot_config, None)
+    robot_training = load_robot_training_spec(robot_config)
+    robot_xml = Path(robot_training.robot.xml_path).expanduser().resolve()
+    if not robot_xml.exists():
+        raise FileNotFoundError(f"Missing robot XML: {robot_xml}")
+    control_joint_names = list(robot_training.robot.control_joint_names)
+    num_dof = len(control_joint_names)
+    is_g1 = _is_g1_reward_robot(robot_training)
+    tasks, task_support_mode = _resolve_reward_tasks(tasks, robot_training)
 
     model_load_device = checkpoint_load_device(device)
     model = load_model_from_checkpoint_dir(checkpoint_dir, device=model_load_device)
@@ -204,7 +243,16 @@ def run_reward_inference(
     output_dir.mkdir(parents=True, exist_ok=True)
     video_dir = output_dir / "videos"
     video_dir.mkdir(parents=True, exist_ok=True)
-    relabel_xml = write_g1_mjlab_relabel_xml(G1_xml, output_dir)
+    if is_g1:
+        relabel_xml = write_g1_mjlab_relabel_xml(robot_xml, output_dir)
+    else:
+        relabel_xml = write_mjlab_relabel_xml(
+            robot_xml,
+            output_dir,
+            control_joint_names,
+            robot_training.robot.name,
+            root_body_name=robot_training.robot.base_body,
+        )
 
     reward_eval_agent = RewardWrapperHV(
         model=model,
@@ -217,8 +265,12 @@ def run_reward_inference(
     )
 
     print(f"[INFO] UFO reward inference model_folder={model_folder}")
-    print(f"[INFO] Reward source XML={G1_xml}")
+    print(f"[INFO] Robot={robot_training.robot.name}")
+    print(f"[INFO] Robot config={Path(robot_training.config_path).expanduser().resolve()}")
+    print(f"[INFO] num_dof={num_dof}")
+    print(f"[INFO] Reward source XML={robot_xml}")
     print(f"[INFO] Reward relabel XML={relabel_xml}")
+    print(f"[INFO] task support mode={task_support_mode}")
     print(f"[INFO] device={device} save_mp4={save_mp4} skip_rollouts={skip_rollouts}")
     print(f"[INFO] tasks={tasks}")
 
@@ -240,6 +292,7 @@ def run_reward_inference(
     env_cfg, _use_root_height_obs = load_mjlab_env_cfg(
         model_folder,
         data_path=data_path,
+        robot_config=robot_config,
         device=device,
         headless=headless,
         disable_dr=disable_dr,
@@ -252,11 +305,12 @@ def run_reward_inference(
         print(f"[INFO] Generating rollout videos with XML={env_cfg.mjcf_path}")
         if save_mp4:
             renderer = MujocoQposRenderer(
-                G1_xml,
+                robot_xml,
                 render_size=render_size,
                 camera_distance=camera_distance,
                 camera_azimuth=camera_azimuth,
                 camera_elevation=camera_elevation,
+                expected_qpos_size=7 + num_dof,
             )
         for task in tasks:
             frames = []
@@ -292,6 +346,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UFO reward inference.")
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--data-path", type=Path, default=None)
+    add_robot_config_manifest_args(parser, purpose="reward inference")
     add_bool_arg(parser, "--headless", True, "Run MuJoCo in headless mode.")
     parser.add_argument("--device", default="cuda:0")
     add_bool_arg(parser, "--save-mp4", False, "Save policy rollout MP4s.")
@@ -313,7 +368,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=50)
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
     add_bool_arg(parser, "--export-onnx", False, "Export ONNX next to the checkpoint before inference.")
-    return parser.parse_args()
+    return resolve_inference_data_and_robot_args(parser.parse_args(), parser)
 
 
 def main() -> None:
@@ -321,6 +376,7 @@ def main() -> None:
     run_reward_inference(
         model_folder=args.model_folder,
         data_path=args.data_path,
+        robot_config=args.robot_config,
         headless=args.headless,
         device=args.device,
         save_mp4=args.save_mp4,
@@ -330,7 +386,7 @@ def main() -> None:
         num_samples=args.num_samples,
         n_inferences=args.n_inferences,
         skip_rollouts=args.skip_rollouts,
-        tasks=args.tasks or DEFAULT_TASKS,
+        tasks=args.tasks,
         buffer_rank=args.buffer_rank,
         buffer_path=args.buffer_path,
         max_workers=args.max_workers,

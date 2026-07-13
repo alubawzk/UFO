@@ -90,6 +90,14 @@ uv run python -m humanoidverse.goal_inference \
   --export-onnx
 ```
 
+`goal_inference` accepts `--robot-config`, `--data-manifest`, `--dataset`, and
+`--rebuild-motion-cache` with the same manifest behavior as tracking inference.
+If no robot config is provided, it defaults to `configs/robots/g1_29dof.yaml`.
+For G1, omitting `--goal-json` keeps the existing
+`goal_frames_lafan29dof.json` fallback. For non-G1 robots, pass a goal JSON
+generated for the selected robot; the G1 goal JSON is not shared across robot
+morphologies.
+
 ## Reward Inference
 
 ```bash
@@ -106,3 +114,13 @@ uv run python -m humanoidverse.reward_inference \
   --save-mp4 \
   --export-onnx
 ```
+
+`reward_inference` also accepts `--robot-config`, `--data-manifest`,
+`--dataset`, and `--rebuild-motion-cache`. G1 keeps the full default reward task
+set. For non-G1 robots, the first robot-config-aware path is limited to
+robot-config-aware rollout/relabel setup and root/locomotion tasks such as
+`move-ego-*` and `rotate-z-*`; arm, crouch, sit-on-ground, and other
+G1-semantics tasks require robot-specific reward semantics and are rejected
+early. The exported ONNX and reward/goal outputs remain tied to the checkpoint's
+robot, action, and observation dimensions. The deploy branch remains G1-only
+unless a robot-specific deploy config is created.
