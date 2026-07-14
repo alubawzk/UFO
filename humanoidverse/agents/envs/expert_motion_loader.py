@@ -6,6 +6,7 @@ import torch
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.utils.torch_utils import quat_rotate_inverse
+from humanoidverse.utils.reference_observations import reference_base_ang_vel
 
 from ..buffers.trajectory import TrajectoryDictBuffer
 
@@ -41,7 +42,7 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         base_quat = ref_body_rots[:, 0]
         ref_dof_pos = motion_res["dof_pos"] - env.default_dof_pos[0]
         ref_dof_vel = motion_res["dof_vel"]
-        ref_ang_vel = ref_body_angular_vels[:, 0]
+        ref_ang_vel = reference_base_ang_vel(env, base_quat, ref_body_angular_vels[:, 0])
         projected_gravity = quat_rotate_inverse(base_quat, env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1), w_last=True)
         bogus_actions = ref_dof_pos * 0
 

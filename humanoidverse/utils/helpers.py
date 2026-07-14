@@ -9,6 +9,7 @@ from typing import Any, List, Dict
 from termcolor import colored
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+from humanoidverse.utils.reference_observations import reference_base_ang_vel
 
 def class_to_dict(obj) -> dict:
     if not  hasattr(obj,"__dict__"):
@@ -195,7 +196,7 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
 
     if env.config.obs.use_obs_filter:
         base_quat = ref_body_rots[:, 0]  # root orientation
-        ref_ang_vel = ref_body_angular_vels[:, 0]
+        ref_ang_vel = reference_base_ang_vel(env, base_quat, ref_body_angular_vels[:, 0])
         projected_gravity = quat_rotate_inverse(
             base_quat,
             env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1),

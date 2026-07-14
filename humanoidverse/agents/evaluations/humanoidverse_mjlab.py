@@ -19,6 +19,7 @@ from tqdm import tqdm
 from ..buffers.trajectory import TrajectoryDictBufferMultiDim
 from ..envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from .base import BaseEvalConfig, extract_model
+from humanoidverse.utils.reference_observations import reference_base_ang_vel
 
 def get_next(field: str, data: Any):
     if "next" in data and field in data["next"]:
@@ -222,7 +223,7 @@ def get_backward_observation(env, motion_id, include_last_action, velocity_multi
         base_quat = ref_body_rots[:, 0]  # root orientation
         # ref_dof_pos = motion_state["dof_pos"] - env.default_dof_pos[0]
         # ref_dof_vel = motion_state["dof_vel"]
-        ref_ang_vel = ref_body_angular_vels[:, 0]
+        ref_ang_vel = reference_base_ang_vel(env, base_quat, ref_body_angular_vels[:, 0])
         projected_gravity = quat_rotate_inverse(base_quat, env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1), w_last=True)
         bogus_actions = ref_dof_pos
 
