@@ -1,0 +1,91 @@
+<mujoco model="mini3_plum_stakes_stairs">
+  <!-- Keep the robot definition centralized in mini3.xml.
+       This scene keeps an infinite ground plane and uses raised boxes/posts for the route:
+       stairs up -> flat high platform -> plum-stake posts -> flat high platform ->
+       stairs down to the ground plane.
+  -->
+  <include file="mini3.xml" />
+
+  <option timestep="0.001" iterations="120" solver="PGS" gravity="0 0 -9.81">
+    <flag frictionloss="enable" />
+  </option>
+  <size njmax="5000" nconmax="1000" />
+  <statistic center="4.0 0 0.8" extent="5.0" />
+
+  <visual>
+    <quality shadowsize="4096" />
+    <map znear="0.001" zfar="50" />
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+    <global azimuth="-140" elevation="-30" />
+  </visual>
+
+  <default>
+    <default class="parkour_plane">
+      <geom condim="4" contype="1" conaffinity="15" friction="1.2 0.01 0.001"
+            solref="0.001 2" margin="0" gap="0" priority="0" material="mini3_ground" group="0" />
+    </default>
+    <default class="mini3_stair_tread">
+      <geom type="box" condim="4" contype="1" conaffinity="15" friction="1.2 0.005 0.0001"
+            solref="0.001 2" margin="0" gap="0" priority="1" material="mini3_stair_tread" group="0" />
+    </default>
+    <default class="mini3_plum_stake">
+      <geom type="cylinder" condim="4" contype="1" conaffinity="15" friction="1.2 0.005 0.0001"
+            solref="0.001 2" margin="0" gap="0" priority="1" material="mini3_plum_stake" group="0" />
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.68 0.84 0.98" rgb2="0.90 0.95 1.0" width="512" height="512" />
+    <texture type="2d" name="mini3_ground_tex" builtin="checker" mark="edge"
+             rgb1="0.20 0.24 0.28" rgb2="0.12 0.14 0.16" markrgb="0.8 0.8 0.8"
+             width="300" height="300" />
+    <material name="mini3_ground" texture="mini3_ground_tex" texuniform="true" texrepeat="8 8" reflectance="0.08" />
+    <material name="mini3_stair_tread" rgba="0.46 0.50 0.52 1" reflectance="0.05" specular="0.12" shininess="0.20" />
+    <material name="mini3_plum_stake" rgba="0.32 0.23 0.16 1" reflectance="0.04" specular="0.10" shininess="0.18" />
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".4 .4 .4" specular="0.1 0.1 0.1" pos="0 0 5.0" dir="0 0 -1" castshadow="false" />
+    <light directional="true" diffuse=".6 .6 .6" specular="0.2 0.2 0.2" pos="0 0 4" dir="0 0 -1" />
+
+    <geom name="ground" class="parkour_plane" type="plane" size="0 0 1" material="mini3_ground" />
+
+    <!-- Stairs up: 8 treads, 6 cm rise, 32 cm tread depth, reaching a 48 cm high platform. -->
+    <body name="mini3_stairs_up_to_plum_stakes" pos="0.60 0.00 0.00">
+      <geom name="mini3_stair_up_0" class="mini3_stair_tread" pos="0.16 0.00 0.03" size="0.16 0.55 0.03" />
+      <geom name="mini3_stair_up_1" class="mini3_stair_tread" pos="0.48 0.00 0.06" size="0.16 0.55 0.06" />
+      <geom name="mini3_stair_up_2" class="mini3_stair_tread" pos="0.80 0.00 0.09" size="0.16 0.55 0.09" />
+      <geom name="mini3_stair_up_3" class="mini3_stair_tread" pos="1.12 0.00 0.12" size="0.16 0.55 0.12" />
+      <geom name="mini3_stair_up_4" class="mini3_stair_tread" pos="1.44 0.00 0.15" size="0.16 0.55 0.15" />
+      <geom name="mini3_stair_up_5" class="mini3_stair_tread" pos="1.76 0.00 0.18" size="0.16 0.55 0.18" />
+      <geom name="mini3_stair_up_6" class="mini3_stair_tread" pos="2.08 0.00 0.21" size="0.16 0.55 0.21" />
+      <geom name="mini3_stair_up_7" class="mini3_stair_tread" pos="2.40 0.00 0.24" size="0.16 0.55 0.24" />
+    </body>
+
+    <geom name="mini3_pre_plum_stakes_platform" class="mini3_stair_tread" pos="3.56 0.00 0.24" size="0.40 0.55 0.24" />
+
+    <!-- Plum-stake section. Each post top is at z=0.48 m.
+         Radius=0.12 m, center spacing=0.34 m, alternating lateral offsets make a mild zig-zag. -->
+    <body name="mini3_plum_stakes" pos="0.00 0.00 0.00">
+      <geom name="mini3_plum_stake_0" class="mini3_plum_stake" pos="4.16  0.00 0.24" size="0.12 0.24" />
+      <geom name="mini3_plum_stake_1" class="mini3_plum_stake" pos="4.50  0.13 0.24" size="0.12 0.24" />
+      <geom name="mini3_plum_stake_2" class="mini3_plum_stake" pos="4.84 -0.13 0.24" size="0.12 0.24" />
+      <geom name="mini3_plum_stake_3" class="mini3_plum_stake" pos="5.18  0.13 0.24" size="0.12 0.24" />
+      <geom name="mini3_plum_stake_4" class="mini3_plum_stake" pos="5.52 -0.13 0.24" size="0.12 0.24" />
+      <geom name="mini3_plum_stake_5" class="mini3_plum_stake" pos="5.86  0.00 0.24" size="0.12 0.24" />
+    </body>
+
+    <geom name="mini3_post_plum_stakes_platform" class="mini3_stair_tread" pos="6.28 0.00 0.24" size="0.30 0.55 0.24" />
+
+    <!-- Stairs down from the high platform back to the infinite ground plane. -->
+    <body name="mini3_stairs_down_to_ground" pos="6.58 0.00 0.00">
+      <geom name="mini3_stair_down_0" class="mini3_stair_tread" pos="0.16 0.00 0.21" size="0.16 0.55 0.21" />
+      <geom name="mini3_stair_down_1" class="mini3_stair_tread" pos="0.48 0.00 0.18" size="0.16 0.55 0.18" />
+      <geom name="mini3_stair_down_2" class="mini3_stair_tread" pos="0.80 0.00 0.15" size="0.16 0.55 0.15" />
+      <geom name="mini3_stair_down_3" class="mini3_stair_tread" pos="1.12 0.00 0.12" size="0.16 0.55 0.12" />
+      <geom name="mini3_stair_down_4" class="mini3_stair_tread" pos="1.44 0.00 0.09" size="0.16 0.55 0.09" />
+      <geom name="mini3_stair_down_5" class="mini3_stair_tread" pos="1.76 0.00 0.06" size="0.16 0.55 0.06" />
+      <geom name="mini3_stair_down_6" class="mini3_stair_tread" pos="2.08 0.00 0.03" size="0.16 0.55 0.03" />
+    </body>
+  </worldbody>
+</mujoco>

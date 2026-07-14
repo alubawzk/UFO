@@ -1,22 +1,10 @@
-<h1 align="center">
-  UFO：面向人形机器人控制的无监督强化学习框架
-</h1>
+# UFO：面向人形机器人控制的无监督强化学习框架
 
-<p align="center">
-  <a href="https://roboparty.github.io/UFO/"><img alt="Website" src="https://img.shields.io/badge/Website-roboparty.github.io%2FUFO-2563eb?style=for-the-badge" /></a>
-  <a href="https://youtu.be/uJPcLdn9sNA"><img alt="Video" src="https://img.shields.io/badge/Video-Demo-7c3aed?style=for-the-badge" /></a>
-  <a href="https://roboparty.github.io/UFO/assets/UFO.pdf"><img alt="PDF" src="https://img.shields.io/badge/PDF-Available-0f766e?style=for-the-badge" /></a>
-</p>
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README_zh-CN.md">中文</a>
-</p>
 
-<p align="center">
-  <img src="./assets/UFO.png" alt="UFO" height="72" style="vertical-align: middle;" />
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="./assets/rplab_logo.png" alt="ROBO PARTY LAB Logo" height="72" style="vertical-align: middle;" />
-</p>
+[English](README.md) | [中文](README_zh-CN.md)
+
+      
 
 ## UFO 是什么？
 
@@ -26,23 +14,29 @@ UFO 是一个开源的无监督强化学习人形机器人控制框架。`main` 
 
 ## 当前支持范围
 
-| 功能 | 状态 |
-| --- | --- |
-| G1 训练 | 支持，测试最充分 |
-| RobotState CSV / NPZ / `ufo_pkl` | 支持 |
-| 多数据源 manifest | 支持 |
-| Tracking inference | Robot-config aware |
-| Goal inference | 支持 robot config；非 G1 需要机器人专属 goal JSON |
-| Reward inference | G1 支持完整默认任务；非 G1 当前主要支持 root/locomotion 任务 |
-| 实机部署 / 遥操作 | 使用 [`deploy` 分支](https://github.com/Roboparty/UFO/tree/deploy) |
-| 自动 motion retargeting | 不支持 |
-| 跨机器人复用同一个 checkpoint | 不支持 |
+
+| 功能                               | 状态                                                             |
+| -------------------------------- | -------------------------------------------------------------- |
+| G1 训练                            | 支持，测试最充分                                                       |
+| RobotState CSV / NPZ / `ufo_pkl` | 支持                                                             |
+| 多数据源 manifest                    | 支持                                                             |
+| Tracking inference               | Robot-config aware                                             |
+| Goal inference                   | 支持 robot config；非 G1 需要机器人专属 goal JSON                         |
+| Reward inference                 | G1 支持完整默认任务；非 G1 当前主要支持 root/locomotion 任务                     |
+| 实机部署 / 遥操作                       | 使用 `deploy` [分支](https://github.com/Roboparty/UFO/tree/deploy) |
+| 自动 motion retargeting            | 不支持                                                            |
+| 跨机器人复用同一个 checkpoint             | 不支持                                                            |
+
 
 > [!NOTE]
 > `main` 分支：训练、数据导入、推理、ONNX 导出。
 > `deploy` 分支：G1 实机部署和遥操作运行时。
 
+
+
 ## 路线 A：Unitree G1 快速开始
+
+
 
 ### 1. 安装环境
 
@@ -51,7 +45,7 @@ git clone https://github.com/Roboparty/UFO.git
 cd UFO
 ```
 
-安装 [`uv`](https://docs.astral.sh/uv/)：
+安装 `[uv](https://docs.astral.sh/uv/)`：
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -78,6 +72,8 @@ uv run wandb login
 # 或者: export WANDB_API_KEY=your_wandb_api_key
 ```
 
+
+
 ### 2. 下载 G1 LaFAN 数据
 
 大数据不放在 Git 仓库中。使用下面的命令下载默认的 G1 LaFAN 数据：
@@ -86,6 +82,8 @@ uv run wandb login
 bash scripts/download_data.sh g1_lafan
 ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
 ```
+
+
 
 ### 3. Smoke test
 
@@ -97,6 +95,8 @@ ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
   --smoke \
   --work-dir /tmp/ufo_smoke_g1
 ```
+
+
 
 ### 4. FB 训练
 
@@ -114,6 +114,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
   --use-wandb \
   --wandb-run-name ufo_fb_g1
 ```
+
+
 
 ### 5. TeCH 训练
 
@@ -212,6 +214,8 @@ uv run python -m humanoidverse.tools.data_build \
   --work-dir /tmp/ufo_smoke_my_robot
 ```
 
+
+
 ## 常见注意事项
 
 - G1 是当前最完整、测试最充分的路径。
@@ -223,6 +227,8 @@ uv run python -m humanoidverse.tools.data_build \
 - TeCH 曾经叫 TLDR，`--agent tldr` 仍是兼容 alias。
 - 不同机器人之间不能直接复用同一个 checkpoint。
 
+
+
 ## 多数据源技能注入
 
 UFO 支持基于 manifest 的多数据源混合。每个数据源之间的采样比例保持固定，prioritized sampling 在每个数据源内部进行。这适合在保持基础动作分布的同时注入少量稀有高敏捷技能，例如 cartwheel。可以参考 `configs/data/example_mix.yaml`。
@@ -233,6 +239,8 @@ UFO 支持基于 manifest 的多数据源混合。每个数据源之间的采样
 - [Robot-Config Training](docs/robot_config_training.md)：实验性的 robot-aware training 初始化说明。
 - [Training and Inference](docs/TRAIN_INFERENCE.md)：更多训练和推理命令。
 - [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy)：G1 实机部署和遥操作运行时。
+
+
 
 ## 引用 / 许可证
 

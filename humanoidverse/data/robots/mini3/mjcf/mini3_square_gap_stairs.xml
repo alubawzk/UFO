@@ -1,0 +1,95 @@
+<mujoco model="mini3_square_gap_stairs">
+  <!-- Keep the robot definition centralized in mini3.xml.
+       This scene keeps an infinite ground plane and uses raised boxes for the route:
+       stairs up -> flat high platform -> square_gaps_straight-style gap ->
+       flat high platform -> stairs down to the ground plane.
+
+       square_gaps_straight reference:
+         terrain_difficulty = 0.2
+         gap_distance_range = (0.1, 0.40) -> gap width = 0.16 m
+         gap_depth          = (0.4, 0.6)  -> represented by a 0.64 m raised-route drop
+  -->
+  <include file="mini3.xml" />
+
+  <option timestep="0.001" iterations="120" solver="PGS" gravity="0 0 -9.81">
+    <flag frictionloss="enable" />
+  </option>
+  <size njmax="5000" nconmax="1000" />
+  <statistic center="4.4 0 0.9" extent="5.5" />
+
+  <visual>
+    <quality shadowsize="4096" />
+    <map znear="0.001" zfar="50" />
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+    <global azimuth="-140" elevation="-30" />
+  </visual>
+
+  <default>
+    <default class="parkour_plane">
+      <geom condim="4" contype="1" conaffinity="15" friction="1.2 0.01 0.001"
+            solref="0.001 2" margin="0" gap="0" priority="0" material="mini3_ground" group="0" />
+    </default>
+    <default class="parkour_ground">
+      <geom type="box" condim="4" contype="1" conaffinity="15" friction="1.2 0.01 0.001"
+            solref="0.001 2" margin="0" gap="0" priority="1" material="mini3_ground" group="0" />
+    </default>
+    <default class="mini3_gap_floor">
+      <geom type="box" condim="4" contype="1" conaffinity="15" friction="1.2 0.01 0.001"
+            solref="0.001 2" margin="0" gap="0" priority="1" material="mini3_gap_floor" group="0" />
+    </default>
+    <default class="mini3_stair_tread">
+      <geom type="box" condim="4" contype="1" conaffinity="15" friction="1.2 0.005 0.0001"
+            solref="0.001 2" margin="0" gap="0" priority="1" material="mini3_stair_tread" group="0" />
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.68 0.84 0.98" rgb2="0.90 0.95 1.0" width="512" height="512" />
+    <texture type="2d" name="mini3_ground_tex" builtin="checker" mark="edge"
+             rgb1="0.20 0.24 0.28" rgb2="0.12 0.14 0.16" markrgb="0.8 0.8 0.8"
+             width="300" height="300" />
+    <material name="mini3_ground" texture="mini3_ground_tex" texuniform="true" texrepeat="8 8" reflectance="0.08" />
+    <material name="mini3_gap_floor" rgba="0.08 0.09 0.10 1" reflectance="0.02" specular="0.05" shininess="0.10" />
+    <material name="mini3_stair_tread" rgba="0.46 0.50 0.52 1" reflectance="0.05" specular="0.12" shininess="0.20" />
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".4 .4 .4" specular="0.1 0.1 0.1" pos="0 0 5.0" dir="0 0 -1" castshadow="false" />
+    <light directional="true" diffuse=".6 .6 .6" specular="0.2 0.2 0.2" pos="0 0 4" dir="0 0 -1" />
+
+    <!-- Infinite fallback ground. The route itself is made of raised boxes; the gap is the missing
+         raised platform section, so the robot sees a real drop while the rest of the world has ground. -->
+    <geom name="ground" class="parkour_plane" type="plane" size="0 0 1" material="mini3_ground" />
+
+    <!-- Stairs up: 8 treads, 8 cm rise, 40 cm tread depth, reaching a 64 cm high platform. -->
+    <body name="mini3_stairs_up_to_gap_platform" pos="0.60 0.00 0.00">
+      <geom name="mini3_stair_up_0" class="mini3_stair_tread" pos="0.20 0.00 0.04" size="0.20 0.85 0.04" />
+      <geom name="mini3_stair_up_1" class="mini3_stair_tread" pos="0.60 0.00 0.08" size="0.20 0.85 0.08" />
+      <geom name="mini3_stair_up_2" class="mini3_stair_tread" pos="1.00 0.00 0.12" size="0.20 0.85 0.12" />
+      <geom name="mini3_stair_up_3" class="mini3_stair_tread" pos="1.40 0.00 0.16" size="0.20 0.85 0.16" />
+      <geom name="mini3_stair_up_4" class="mini3_stair_tread" pos="1.80 0.00 0.20" size="0.20 0.85 0.20" />
+      <geom name="mini3_stair_up_5" class="mini3_stair_tread" pos="2.20 0.00 0.24" size="0.20 0.85 0.24" />
+      <geom name="mini3_stair_up_6" class="mini3_stair_tread" pos="2.60 0.00 0.28" size="0.20 0.85 0.28" />
+      <geom name="mini3_stair_up_7" class="mini3_stair_tread" pos="3.00 0.00 0.32" size="0.20 0.85 0.32" />
+    </body>
+
+    <geom name="mini3_pre_gap_high_platform" class="mini3_stair_tread" pos="4.20 0.00 0.32" size="0.40 0.85 0.32" />
+
+    <!-- square_gaps_straight difficulty 0.2: 0.16 m missing raised platform between x=4.60 and x=4.76. -->
+    <geom name="square_gap_bottom_ground_marker" class="mini3_gap_floor" pos="4.68 0.00 0.002"
+          size="0.08 0.85 0.002" contype="0" conaffinity="0" />
+
+    <geom name="mini3_post_gap_high_platform" class="mini3_stair_tread" pos="5.08 0.00 0.32" size="0.32 0.85 0.32" />
+
+    <!-- Stairs down from the high platform back to the infinite ground plane. -->
+    <body name="mini3_stairs_down_to_ground" pos="5.40 0.00 0.00">
+      <geom name="mini3_stair_down_0" class="mini3_stair_tread" pos="0.20 0.00 0.28" size="0.20 0.85 0.28" />
+      <geom name="mini3_stair_down_1" class="mini3_stair_tread" pos="0.60 0.00 0.24" size="0.20 0.85 0.24" />
+      <geom name="mini3_stair_down_2" class="mini3_stair_tread" pos="1.00 0.00 0.20" size="0.20 0.85 0.20" />
+      <geom name="mini3_stair_down_3" class="mini3_stair_tread" pos="1.40 0.00 0.16" size="0.20 0.85 0.16" />
+      <geom name="mini3_stair_down_4" class="mini3_stair_tread" pos="1.80 0.00 0.12" size="0.20 0.85 0.12" />
+      <geom name="mini3_stair_down_5" class="mini3_stair_tread" pos="2.20 0.00 0.08" size="0.20 0.85 0.08" />
+      <geom name="mini3_stair_down_6" class="mini3_stair_tread" pos="2.60 0.00 0.04" size="0.20 0.85 0.04" />
+    </body>
+  </worldbody>
+</mujoco>

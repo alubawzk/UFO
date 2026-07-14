@@ -1,0 +1,60 @@
+<mujoco model="mini3_stairs">
+  <!-- Keep the robot definition centralized in mini3.xml.
+       This scene only adds parkour terrain, lighting, and scene-level solver/visual settings. -->
+  <include file="mini3.xml" />
+
+  <option timestep="0.001" iterations="120" solver="PGS" gravity="0 0 -9.81">
+    <flag frictionloss="enable" />
+  </option>
+  <size njmax="5000" nconmax="1000" />
+  <statistic center="1.5 0 0.8" extent="3.0" />
+
+  <visual>
+    <quality shadowsize="4096" />
+    <map znear="0.001" zfar="50" />
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+    <global azimuth="-140" elevation="-30" />
+  </visual>
+
+  <default>
+    <default class="parkour_ground">
+      <geom condim="4" contype="1" conaffinity="15" friction="1.2 0.01 0.001" solref="0.001 2" group="0" />
+    </default>
+    <default class="mini3_stair_tread">
+      <geom type="box" condim="4" contype="1" conaffinity="15" friction="1.2 0.005 0.0001"
+            solref="0.001 2" margin="0" gap="0" priority="1" material="mini3_stair_tread" group="0" />
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.68 0.84 0.98" rgb2="0.90 0.95 1.0" width="512" height="512" />
+    <texture type="2d" name="mini3_ground_tex" builtin="checker" mark="edge"
+             rgb1="0.20 0.24 0.28" rgb2="0.12 0.14 0.16" markrgb="0.8 0.8 0.8"
+             width="300" height="300" />
+    <material name="mini3_ground" texture="mini3_ground_tex" texuniform="true" texrepeat="8 8" reflectance="0.08" />
+    <material name="mini3_stair_tread" rgba="0.46 0.50 0.52 1" reflectance="0.05" specular="0.12" shininess="0.20" />
+  </asset>
+
+  <worldbody>
+    <light directional="true" diffuse=".4 .4 .4" specular="0.1 0.1 0.1" pos="0 0 5.0" dir="0 0 -1" castshadow="false" />
+    <light directional="true" diffuse=".6 .6 .6" specular="0.2 0.2 0.2" pos="0 0 4" dir="0 0 -1" />
+    <geom name="ground" class="parkour_ground" type="plane" size="0 0 1" material="mini3_ground" />
+
+    <!-- MINI3-scale straight stairs ahead of the spawn point: 6 cm rise, 32 cm tread depth. -->
+    <body name="mini3_straight_stairs" pos="1.00 0.00 0.00">
+      <geom name="mini3_stair_0" class="mini3_stair_tread" pos="0.16 0.00 0.03" size="0.16 0.55 0.03" />
+      <geom name="mini3_stair_1" class="mini3_stair_tread" pos="0.48 0.00 0.06" size="0.16 0.55 0.06" />
+      <geom name="mini3_stair_2" class="mini3_stair_tread" pos="0.80 0.00 0.09" size="0.16 0.55 0.09" />
+      <geom name="mini3_stair_3" class="mini3_stair_tread" pos="1.12 0.00 0.12" size="0.16 0.55 0.12" />
+      <geom name="mini3_stair_4" class="mini3_stair_tread" pos="1.44 0.00 0.15" size="0.16 0.55 0.15" />
+      <geom name="mini3_top_platform" class="mini3_stair_tread" pos="1.92 0.00 0.15" size="0.32 0.55 0.15" />
+    </body>
+
+    <!-- Low stepping platforms to the right of spawn for lateral depth sanity checks. -->
+    <body name="mini3_side_platforms" pos="0.20 -1.40 0.00">
+      <geom name="mini3_side_platform_0" class="mini3_stair_tread" pos="0.00 0.00 0.03" size="0.45 0.18 0.03" />
+      <geom name="mini3_side_platform_1" class="mini3_stair_tread" pos="0.75 0.00 0.04" size="0.45 0.18 0.04" />
+      <geom name="mini3_side_platform_2" class="mini3_stair_tread" pos="1.50 0.00 0.05" size="0.45 0.18 0.05" />
+    </body>
+  </worldbody>
+</mujoco>

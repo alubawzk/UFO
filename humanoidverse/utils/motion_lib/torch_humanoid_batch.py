@@ -51,8 +51,12 @@ class Humanoid_Batch:
         tree = parse(BytesIO(open(self.mjcf_file, "rb").read()), parser=parser,)
         self.dof_axis = []
 
-        joints = sorted([j.attrib['name'] for j in tree.getroot().find("worldbody").findall('.//joint')])
-        motors = sorted([m.attrib['name'] for m in tree.getroot().find("actuator").getchildren()])
+        worldbody = tree.getroot().find("worldbody")
+        joint_elements = worldbody.findall('.//joint')
+        joints_by_name = {joint.attrib['name']: joint for joint in joint_elements}
+        actuator_elements = tree.getroot().find("actuator").getchildren()
+        motors = [motor.attrib['name'] for motor in actuator_elements]
+        motor_joint_names = [motor.attrib.get('joint') for motor in actuator_elements]
         
         assert len(motors) > 0, "No motors found in the mjcf file"
         
@@ -70,22 +74,25 @@ class Humanoid_Batch:
         self.actuated_joints_idx = np.array([self.body_names.index(k) for k, v in mjcf_data['body_to_joint'].items()])
         
         
-        for m in motors:
-            if not m in joints:
-                print(m)
-        
-        if "type" in tree.getroot().find("worldbody").findall('.//joint')[0].attrib and tree.getroot().find("worldbody").findall('.//joint')[0].attrib['type'] == "free":
-            for j in tree.getroot().find("worldbody").findall('.//joint')[1:]:
-                self.dof_axis.append([float(i) for i in j.attrib['axis'].split(" ")])
-            self.has_freejoint = True
-        elif not "type" in tree.getroot().find("worldbody").findall('.//joint')[0].attrib:
-            for j in tree.getroot().find("worldbody").findall('.//joint'):
-                self.dof_axis.append([float(i) for i in j.attrib['axis'].split(" ")])
-            self.has_freejoint = True
-        else:
-            for j in tree.getroot().find("worldbody").findall('.//joint')[6:]:
-                self.dof_axis.append([float(i) for i in j.attrib['axis'].split(" ")])
-            self.has_freejoint = False
+        missing_motor_joints = [name for name in motor_joint_names if name is not None and name not in joints_by_name]
+        if missing_motor_joints:
+            raise ValueError(f"Actuators reference unknown MJCF joints: {missing_motor_joints}")
+
+        # MJCF can represent the floating root either as <freejoint> or as a
+        # <joint type="free">.  Build the controllable axes from actuator
+        # `joint` attributes so actuator names do not need to equal joint names
+        # (Mini3 uses names such as `left_hip_pitch_joint_ctrl`).
+        self.has_freejoint = bool(worldbody.findall('.//freejoint')) or any(
+            joint.attrib.get('type') == 'free' for joint in joint_elements
+        )
+        for joint_name in motor_joint_names:
+            if joint_name is None:
+                continue
+            joint = joints_by_name[joint_name]
+            self.dof_axis.append([float(value) for value in joint.attrib.get('axis', '0 0 1').split()])
+
+        if len(self.dof_axis) != self.num_dof:
+            raise ValueError("Humanoid_Batch requires every actuator to reference one scalar MJCF joint")
         
         self.dof_axis = torch.tensor(self.dof_axis, dtype=torch.float32)
 

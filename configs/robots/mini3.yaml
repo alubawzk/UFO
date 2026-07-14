@@ -1,0 +1,191 @@
+name: mini3
+xml_path: humanoidverse/data/robots/mini3_mjlab/mini3.xml
+
+base_body: base_link
+root_quat_order: xyzw
+coordinate_system: z_up
+dof_unit: rad
+
+# This order is the MuJoCo actuator order and therefore the policy action order.
+control_joints:
+  mode: explicit
+  names:
+    - left_hip_pitch_joint
+    - left_hip_roll_joint
+    - left_hip_yaw_joint
+    - left_knee_pitch_joint
+    - left_ankle_pitch_joint
+    - left_ankle_roll_joint
+    - right_hip_pitch_joint
+    - right_hip_roll_joint
+    - right_hip_yaw_joint
+    - right_knee_pitch_joint
+    - right_ankle_pitch_joint
+    - right_ankle_roll_joint
+    - waist_yaw_joint
+    - left_shoulder_pitch_joint
+    - left_shoulder_roll_joint
+    - left_shoulder_yaw_joint
+    - left_elbow_pitch_joint
+    - right_shoulder_pitch_joint
+    - right_shoulder_roll_joint
+    - right_shoulder_yaw_joint
+    - right_elbow_pitch_joint
+
+feet:
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+
+hands: []
+
+key_bodies:
+  - base_link
+  - waist_yaw_link
+  - left_ankle_roll_link
+  - right_ankle_roll_link
+  - left_elbow_pitch_link
+  - right_elbow_pitch_link
+
+default_dof_pos: {}
+
+training:
+  hydra_robot: mini3/mini3_auto
+  hydra_overrides: []
+
+  semantics:
+    # The auxiliary biped rewards assume exactly left/right contact bodies.
+    contact_bodies:
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+    undesired_contact_bodies:
+      - base_link
+      - waist_yaw_link
+      - head_link
+      - left_hip_roll_link
+      - right_hip_roll_link
+      - left_shoulder_roll_link
+      - right_shoulder_roll_link
+    torso_name: waist_yaw_link
+    left_ankle_dof_names:
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+    right_ankle_dof_names:
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+
+  init_state:
+    pos: [0.0, 0.0, 0.46305]
+    rot: [0.0, 0.0, 0.0, 1.0]
+    lin_vel: [0.0, 0.0, 0.0]
+    ang_vel: [0.0, 0.0, 0.0]
+    default_joint_angles:
+      left_hip_pitch_joint: 0.0
+      left_hip_roll_joint: 0.0
+      left_hip_yaw_joint: 0.0
+      left_knee_pitch_joint: 0.0
+      left_ankle_pitch_joint: 0.0
+      left_ankle_roll_joint: 0.0
+      right_hip_pitch_joint: 0.0
+      right_hip_roll_joint: 0.0
+      right_hip_yaw_joint: 0.0
+      right_knee_pitch_joint: 0.0
+      right_ankle_pitch_joint: 0.0
+      right_ankle_roll_joint: 0.0
+      waist_yaw_joint: 0.0
+      left_shoulder_pitch_joint: 0.0
+      left_shoulder_roll_joint: 0.0
+      left_shoulder_yaw_joint: 0.0
+      left_elbow_pitch_joint: 0.0
+      right_shoulder_pitch_joint: 0.0
+      right_shoulder_roll_joint: 0.0
+      right_shoulder_yaw_joint: 0.0
+      right_elbow_pitch_joint: 0.0
+
+  control:
+    action_scale: 0.25
+    action_clip_value: 5.0
+    normalize_action_to: 5.0
+    effort_limit_scale: 1.0
+    # Effort and velocity limits follow mini3/urdf/mini3.urdf, in control_joints order.
+    effort_limit: [27.0, 27.0, 27.0, 27.0, 25.0, 25.0, 27.0, 27.0, 27.0, 27.0, 25.0, 25.0, 27.0, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5]
+    velocity_limit: [10.0, 10.0, 10.0, 10.0, 45.0, 45.0, 10.0, 10.0, 10.0, 10.0, 45.0, 45.0, 10.0, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0, 45.0]
+    # Mini3 reference PD gains, written per joint because pitch/roll/yaw differ.
+    stiffness:
+      left_hip_pitch_joint: 60.0
+      left_hip_roll_joint: 55.0
+      left_hip_yaw_joint: 25.0
+      left_knee_pitch_joint: 60.0
+      left_ankle_pitch_joint: 50.0
+      left_ankle_roll_joint: 45.0
+      right_hip_pitch_joint: 60.0
+      right_hip_roll_joint: 55.0
+      right_hip_yaw_joint: 25.0
+      right_knee_pitch_joint: 60.0
+      right_ankle_pitch_joint: 50.0
+      right_ankle_roll_joint: 45.0
+      waist_yaw_joint: 65.0
+      left_shoulder_pitch_joint: 30.0
+      left_shoulder_roll_joint: 25.0
+      left_shoulder_yaw_joint: 30.0
+      left_elbow_pitch_joint: 20.0
+      right_shoulder_pitch_joint: 30.0
+      right_shoulder_roll_joint: 25.0
+      right_shoulder_yaw_joint: 30.0
+      right_elbow_pitch_joint: 20.0
+    damping:
+      left_hip_pitch_joint: 4.5
+      left_hip_roll_joint: 2.8
+      left_hip_yaw_joint: 1.1
+      left_knee_pitch_joint: 4.5
+      left_ankle_pitch_joint: 1.2
+      left_ankle_roll_joint: 1.2
+      right_hip_pitch_joint: 4.5
+      right_hip_roll_joint: 2.8
+      right_hip_yaw_joint: 1.1
+      right_knee_pitch_joint: 4.5
+      right_ankle_pitch_joint: 1.2
+      right_ankle_roll_joint: 1.2
+      waist_yaw_joint: 3.0
+      left_shoulder_pitch_joint: 1.0
+      left_shoulder_roll_joint: 2.0
+      left_shoulder_yaw_joint: 1.0
+      left_elbow_pitch_joint: 1.0
+      right_shoulder_pitch_joint: 1.0
+      right_shoulder_roll_joint: 2.0
+      right_shoulder_yaw_joint: 1.0
+      right_elbow_pitch_joint: 1.0
+
+  # Mini3 must use YAML actuator values; the G1 mode-15 preset is robot-specific.
+  actuator:
+    source: yaml
+    joints:
+      left_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      left_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      left_hip_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      left_knee_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      left_ankle_pitch_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
+      left_ankle_roll_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
+      right_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      right_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      right_hip_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      right_knee_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      right_ankle_pitch_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
+      right_ankle_roll_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
+      waist_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
+      left_shoulder_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      left_shoulder_roll_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      left_shoulder_yaw_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      left_elbow_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      right_shoulder_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      right_shoulder_roll_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      right_shoulder_yaw_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      right_elbow_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+
+metadata:
+  generated_from_xml: humanoidverse/data/robots/mini3_mjlab/mini3.xml
+  urdf_source: humanoidverse/data/robots/mini3/urdf/mini3.urdf
+  review_status: draft
+  warnings:
+    - PD gains follow the supplied Mini3 reference arrays; verify them with the actual control frequency and hardware version.
+    - Confirm the zero-angle stand pose and base height before formal training.
+    - Confirm undesired contact bodies against the intended skill set.
