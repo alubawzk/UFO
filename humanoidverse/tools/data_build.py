@@ -1,4 +1,4 @@
-"""Build a UFO motion data manifest from robot_state CSV/NPZ sources."""
+"""Build a UFO motion data manifest from robot_state CSV/NPZ/flat-PKL sources."""
 
 from __future__ import annotations
 
@@ -52,8 +52,12 @@ def write_manifest(config: dict[str, Any], out_path: str | Path, *, force: bool 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", required=True, help="Robot YAML path")
-    parser.add_argument("--source", required=True, nargs="+", help="CSV/NPZ source path, directory, or glob")
-    parser.add_argument("--format", default="auto", choices=["auto", "robot_state_csv", "robot_state_npz"])
+    parser.add_argument("--source", required=True, nargs="+", help="CSV/NPZ/flat-PKL source path, directory, or glob")
+    parser.add_argument(
+        "--format",
+        default="auto",
+        choices=["auto", "robot_state_csv", "robot_state_npz", "robot_state_pkl"],
+    )
     parser.add_argument("--name", required=True, help="Dataset name")
     parser.add_argument("--weight", type=float, default=1.0)
     parser.add_argument("--fps", type=float, default=None)

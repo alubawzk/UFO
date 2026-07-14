@@ -56,8 +56,8 @@ def _robot_state_motion(
     joint_names: list[str] | None = None,
     zero_quat: bool = False,
 ) -> RobotStateMotion:
-    root_quat = np.zeros((frames, 4), dtype=np.float32) if zero_quat else np.tile(
-        np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (frames, 1)
+    root_quat = (
+        np.zeros((frames, 4), dtype=np.float32) if zero_quat else np.tile(np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32), (frames, 1))
     )
     if dof_pos is None:
         dof_pos = np.zeros((frames, 2), dtype=np.float32)
@@ -210,7 +210,7 @@ class MotionDataAdapterTest(unittest.TestCase):
             validate_ufo_motion_dict(_motion_dict(fps=0.0), "unit")
 
     def test_public_supported_formats_are_minimal(self) -> None:
-        self.assertEqual(SUPPORTED_FORMATS, {"ufo_pkl", "robot_state_csv", "robot_state_npz"})
+        self.assertEqual(SUPPORTED_FORMATS, {"ufo_pkl", "robot_state_csv", "robot_state_npz", "robot_state_pkl"})
 
     def test_robot_spec_parses_minimal_mujoco_xml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -565,7 +565,6 @@ class MotionDataAdapterTest(unittest.TestCase):
             )
             path = prepare_manifest_dataset_path(manifest_path, "pkl", split="inference", cache_root=root / "cache")
             self.assertEqual(Path(path), train_path.resolve())
-
 
     def test_motion_lib_prefers_raw_dof_pos_when_present(self) -> None:
         raw = np.asarray(

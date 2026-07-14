@@ -4,7 +4,7 @@
 
 本文只记录适配工作，不代表自动生成的参数可以直接用于大规模训练或实机。PD、力矩限制、默认姿态、碰撞和奖励参数必须经过仿真与硬件规格复核。
 
-> 实施状态（2026-07-14）：XML 路径/default pose、RobotSpec、Hydra 配置、MotionLib actuator/freejoint 兼容和结构回归测试已完成；动作数据、完整 MJLab smoke、PD/碰撞调参与部署工作尚未完成。
+> 实施状态（2026-07-14）：XML 路径/default pose、RobotSpec、Hydra 配置、MotionLib actuator/freejoint 兼容、CSV 转换器和结构回归测试已完成；真实 CSV 的抽样转换及 manifest/cache 构建已通过，完整数据转换、Mini3 MJLab smoke、PD/碰撞调参与部署工作尚未完成。
 
 ## 1. 当前模型检查结论
 
@@ -318,23 +318,51 @@ robot:
 
 G1 的 LaFAN pkl、29DOF CSV 和 G1 checkpoint 都不能用于 Mini3。动作必须先 retarget 到这份 Mini3 XML 的 21 个控制关节。
 
-推荐使用带关节名的 CSV。每行是一帧，核心列为：
+当前 `humanoidverse/data/csv` 中的数据已经 retarget 到 Mini3，原始格式为：
 
 ```text
-time,
-root_pos_x,root_pos_y,root_pos_z,
-root_quat_x,root_quat_y,root_quat_z,root_quat_w,
-left_hip_pitch_joint,...,right_elbow_pitch_joint
+Frame,
+root_translateX,root_translateY,root_translateZ,
+root_rotateX,root_rotateY,root_rotateZ,
+left_hip_pitch_joint_dof,...,right_elbow_pitch_joint_dof
 ```
 
-要求：
+已确认的源数据约定为：
 
-- root position 使用 Z-up 世界坐标，通常单位为米；
-- CSV root quaternion 使用 `xyzw`；
-- 21 个关节角使用弧度；
+- 采样率为 `120 FPS`；
+- root position 为厘米，转换时乘 `0.01` 得到米；
+- root Euler 和 21 个关节角均为 degree；
+- root Euler 顺序为 intrinsic `XYZ`；SciPy 中必须使用大写 `"XYZ"`，小写 `"xyz"` 表示 extrinsic，不能混用；
+- 输出 root quaternion 为 `xyzw`，21 个关节角为 radian；
 - 每一帧 root pose 和 21 个 DOF 必须属于同一时刻；
 - 数据已经适配到 Mini3，UFO 不负责 retarget；
-- 有 `time` 时建议不再在 manifest 中重复填写不一致的 `fps`；没有 `time` 时必须提供 `--fps`。
+- `_M.csv` 是镜像动作，可按训练集需求保留或使用 `--exclude-mirrored` 排除。
+
+仓库中的转换器会逐文件处理、检查字段/连续帧/有限值/XML 关节限位，并原子写入标准 RobotState NPZ：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.convert_mini3_csv \
+  --input humanoidverse/data/csv \
+  --output-dir /tmp/mini3_npz_smoke \
+  --sample-files 20 \
+  --verify-output
+```
+
+默认参数已经固定为 `--fps 120 --position-scale 0.01 --euler-order XYZ`。若输出文件已经存在，默认跳过，因此中断后可以重跑续转；只有确认需要覆盖时才加 `--overwrite`。输出目录是扁平 NPZ 目录，源文件 stem 冲突时转换器会拒绝继续。
+
+先生成一个可控规模的数据集，而不是直接把全部原始数据放进同一个训练 cache：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.convert_mini3_csv \
+  --input humanoidverse/data/csv \
+  --output-dir /path/to/mini3_robot_state_npz_2k \
+  --sample-files 2000 \
+  --seed 4728 \
+  --exclude-mirrored \
+  --verify-output
+```
+
+如确实需要转换全部文件，去掉 `--sample-files` 和 `--exclude-mirrored`。原始目录约 13.5 万个文件、上亿帧，不建议把全量结果一次构建成单个内存/GPU 训练 cache，应按动作类别或多个 manifest dataset 分片。
 
 无表头格式虽然也能用，但要注意：Mini3 无表头无 time 恰好也是 28 列，和 MuJoCo `qpos` 宽度相同；两者四元数顺序不同：
 
@@ -343,28 +371,90 @@ left_hip_pitch_joint,...,right_elbow_pitch_joint
 
 不能直接把 MuJoCo qpos 原样当作无表头 RobotState CSV。
 
-先检查数据：
+转换后先检查数据：
 
 ```bash
-uv run python -m humanoidverse.tools.data_inspect \
+.venv/bin/python -m humanoidverse.tools.data_inspect \
   --robot configs/robots/mini3.yaml \
-  --source "/path/to/mini3/motions/*.csv" \
-  --format robot_state_csv
+  --source /path/to/mini3_robot_state_npz_2k \
+  --format robot_state_npz
 ```
 
-如果 CSV 没有 time，再加：
+也可以直接用 MuJoCo 交互回放单个转换结果。播放器按 NPZ 中的 FPS 运动学回放 root pose 和 21 个关节，不施加重力、PD 或接触动力学，因此画面反映的是数据本身：
 
-```text
---fps 50
+```bash
+.venv/bin/python -m humanoidverse.tools.play_robot_state_npz \
+  --npz humanoidverse/data/mini3_robot_state_npz/Idle_Left_001__A017.npz
+```
+
+常用按键：空格暂停/继续，左右方向键逐帧，上下方向键前后跳一秒，`R` 回到起点，`[`/`]` 调整倍速，`L` 切换循环，`C` 显示/隐藏碰撞体，`Q` 退出。远程机器没有图形桌面时可先只做数据、qpos 和 MuJoCo FK 检查：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.play_robot_state_npz \
+  --npz /path/to/motion.npz \
+  --check-only \
+  --print-joint-ranges
+```
+
+如果要检查转换前的原始 CSV，可直接在内存中按 120 FPS、cm→m、intrinsic `XYZ`、degree→radian 解释并播放，不会生成新的 NPZ：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.play_mini3_csv \
+  --csv humanoidverse/data/csv/220705/Idle_Left_001__A017.csv
+```
+
+还可以逐帧比较转换前后的 root position、root orientation 和 21 个 DOF；只有误差在浮点容差内才会打开播放器：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.play_mini3_csv \
+  --csv humanoidverse/data/csv/220705/Idle_Left_001__A017.csv \
+  --compare-npz humanoidverse/data/mini3_robot_state_npz/Idle_Left_001__A017.npz
+```
+
+如果要直接检查 flat PKL，可使用 PKL 播放器。它直接读取 `root_rot`，不会从 CSV 欧拉角重新计算四元数；当前 Mini3 PKL 的四元数分量顺序为 `xyzw`（默认值）：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.play_mini3_pkl \
+  --pkl humanoidverse/data/pkl/210531/jump_and_land_heavy_001__A001_M.pkl
+```
+
+无图形桌面时可只校验 PKL 字段、关节限位、MuJoCo `qpos` 映射和前向运动学：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.play_mini3_pkl \
+  --pkl humanoidverse/data/pkl/210531/jump_and_land_heavy_001__A001_M.pkl \
+  --check-only \
+  --print-joint-ranges
+```
+
+确认 PKL 根姿态正确后，可以直接从 flat PKL 生成训练格式，不再经过 CSV 或 NPZ：
+
+```bash
+.venv/bin/python -m humanoidverse.tools.convert_mini3_pkl \
+  --input humanoidverse/data/pkl \
+  --output-dir humanoidverse/data/mini3_pkl_ufo \
+  --manifest configs/data/mini3_pkl.yaml
+```
+
+转换器直接读取每个源文件的 `root_pos`、`root_rot`、`dof_pos` 和 `fps`。`root_rot` 默认按 `xyzw` 解释，并仅转换成 MotionLib 要求的根节点 axis-angle，不会使用 CSV 欧拉角。输出采用每个约 10 秒片段一个 UFO PKL 的目录布局，避免启动训练时将全量数据先合并成一个超大 Python 字典；不足 1 秒的尾段会丢弃。同一条命令可以安全续跑，已有输出会被复用。
+
+转换完成后直接训练：
+
+```bash
+./run_train.sh \
+  --agent fb \
+  --data-manifest configs/data/mini3_pkl.yaml \
+  --gpu-ids single \
+  --work-dir runs/ufo_fb_mini3
 ```
 
 生成 manifest 和 UFO pkl cache：
 
 ```bash
-uv run python -m humanoidverse.tools.data_build \
+.venv/bin/python -m humanoidverse.tools.data_build \
   --robot configs/robots/mini3.yaml \
-  --source "/path/to/mini3/motions/*.csv" \
-  --format robot_state_csv \
+  --source /path/to/mini3_robot_state_npz_2k \
+  --format robot_state_npz \
   --name mini3_motion \
   --clip-seconds 10 \
   --out configs/data/mini3_motion.yaml \
@@ -382,8 +472,8 @@ uv run python -m unittest discover -s tests -p 'test_*.py'
 
 uv run python -m humanoidverse.tools.data_inspect \
   --robot configs/robots/mini3.yaml \
-  --source "/path/to/mini3/motions/*.csv" \
-  --format robot_state_csv
+  --source /path/to/mini3_robot_state_npz_2k \
+  --format robot_state_npz
 ```
 
 建议增加 Mini3 回归测试，至少断言：
@@ -501,10 +591,10 @@ uv run python -m humanoidverse.tracking_inference \
 - [x] 在 XML/YAML 中确定并统一第一版 stand pose（动态稳定性待 smoke 验证）。
 - [x] 创建 `configs/robots/mini3.yaml` 第一版（已填入参考 PD，动态稳定性和碰撞参数仍待校准）。
 - [x] 创建并完成结构复核 `humanoidverse/config/robot/mini3/mini3_auto.yaml`。
-- [ ] 创建 Mini3 专属 RobotState CSV/NPZ 数据。
+- [x] 接入 Mini3 专属原始 CSV，并提供标准 RobotState NPZ 转换器（全量转换仍待执行）。
 - [ ] 创建 `configs/data/mini3_motion.yaml`。
 - [x] 增加 Mini3 XML、RobotSpec 和 Hydra 配置回归测试。
-- [ ] 数据准备完成后增加 Mini3 数据转换回归测试。
+- [x] 增加 Mini3 CSV 单位、intrinsic XYZ、关节顺序、限位和 NPZ 读取回归测试。
 
 ### 按功能选做
 

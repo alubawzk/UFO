@@ -10,12 +10,11 @@ import joblib
 
 from humanoidverse.utils.motion_data.paths import expand_motion_paths
 from humanoidverse.utils.motion_data.robot_state_convert import robot_state_dict_to_ufo_motion_dict
-from humanoidverse.utils.motion_data.robot_state_readers import read_robot_state_csv, read_robot_state_npz
+from humanoidverse.utils.motion_data.robot_state_readers import read_robot_state_csv, read_robot_state_npz, read_robot_state_pkl
 from humanoidverse.utils.motion_data.schema import validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import RobotSpec
 
-
-SUPPORTED_FORMATS = {"ufo_pkl", "robot_state_csv", "robot_state_npz"}
+SUPPORTED_FORMATS = {"ufo_pkl", "robot_state_csv", "robot_state_npz", "robot_state_pkl"}
 
 
 def _merge_motion_dicts(sources: list[tuple[Path, dict[str, Any]]], source_name: str) -> dict[str, Any]:
@@ -81,6 +80,26 @@ def load_robot_state_npz(
     return robot_state_dict_to_ufo_motion_dict(robot_state, robot_spec, source_name)
 
 
+def load_robot_state_pkl(
+    path_spec: str | os.PathLike[str] | list[str],
+    *,
+    source_name: str,
+    robot_spec: RobotSpec,
+    base_dir: Path | None = None,
+    fps: float | int | None = None,
+    root_quat_order: str = "xyzw",
+) -> dict[str, Any]:
+    robot_state = read_robot_state_pkl(
+        path_spec,
+        source_name=source_name,
+        robot_spec=robot_spec,
+        base_dir=base_dir,
+        fps=fps,
+        root_quat_order=root_quat_order,
+    )
+    return robot_state_dict_to_ufo_motion_dict(robot_state, robot_spec, source_name)
+
+
 def load_motion_data_by_format(
     fmt: str,
     path_spec: str | os.PathLike[str] | list[str],
@@ -110,6 +129,16 @@ def load_motion_data_by_format(
             robot_spec=_require_robot_spec(fmt, robot_spec),
             base_dir=base_dir,
             fps=fps,
+        )
+    if fmt == "robot_state_pkl":
+        config = dict(columns or {})
+        return load_robot_state_pkl(
+            path_spec,
+            source_name=source_name,
+            robot_spec=_require_robot_spec(fmt, robot_spec),
+            base_dir=base_dir,
+            fps=fps,
+            root_quat_order=str(config.get("root_quat_order", "xyzw")),
         )
     raise ValueError(f"Unsupported motion data format '{fmt}'. Supported formats: {sorted(SUPPORTED_FORMATS)}")
 

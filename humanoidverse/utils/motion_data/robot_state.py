@@ -46,8 +46,7 @@ def reorder_dof_by_joint_names(
         raise ValueError(f"{source_name} dof_pos must have shape [T, N], got {dof.shape}")
     if len(input_joint_names) != dof.shape[1]:
         raise ValueError(
-            f"{source_name} joint_names length must match dof_pos width, "
-            f"got {len(input_joint_names)} names for width {dof.shape[1]}"
+            f"{source_name} joint_names length must match dof_pos width, got {len(input_joint_names)} names for width {dof.shape[1]}"
         )
     if len(set(input_joint_names)) != len(input_joint_names):
         raise ValueError(f"{source_name} joint_names contains duplicates")
@@ -75,10 +74,7 @@ def validate_robot_state_motion(
     if not np.all(np.isfinite(dof)):
         raise ValueError(f"{context} dof_pos contains non-finite values")
     if root.shape[0] != quat.shape[0] or root.shape[0] != dof.shape[0]:
-        raise ValueError(
-            f"{context} root_pos/root_quat/dof_pos must share T, "
-            f"got {root.shape[0]}, {quat.shape[0]}, {dof.shape[0]}"
-        )
+        raise ValueError(f"{context} root_pos/root_quat/dof_pos must share T, got {root.shape[0]}, {quat.shape[0]}, {dof.shape[0]}")
 
     fps = float(motion.fps)
     if not np.isfinite(fps) or fps <= 0.0:

@@ -88,6 +88,16 @@ ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
 ### 3. Smoke test
 
 ```bash
+# 5090
+UV_NO_SYNC=1 ./run_train.sh \
+  --agent fb \
+  --data-manifest configs/data/example_mix.yaml \
+  --gpu-ids single \
+  --smoke \
+  --buffer-size 4096 \
+  --work-dir /tmp/ufo_smoke_g1
+
+# 4090
 ./run_train.sh \
   --agent fb \
   --data-manifest configs/data/example_mix.yaml \
@@ -96,6 +106,67 @@ ls -lh humanoidverse/data/lafan_29dof_10s-clipped.pkl
   --work-dir /tmp/ufo_smoke_g1
 ```
 
+## 3.1 数据检查
+```bash
+## 抽样转换
+.venv/bin/python -m humanoidverse.tools.convert_mini3_csv \
+  --input humanoidverse/data/csv \
+  --output-dir /tmp/mini3_npz_smoke \
+  --sample-files 20 \
+  --verify-output
+
+## 检查结果
+.venv/bin/python -m humanoidverse.tools.data_inspect \
+  --robot configs/robots/mini3.yaml \
+  --source /tmp/mini3_npz_smoke \
+  --format robot_state_npz
+
+## 全量转换
+.venv/bin/python -m humanoidverse.tools.convert_mini3_csv \
+  --input humanoidverse/data/csv \
+  --output-dir humanoidverse/data/mini3_robot_state_npz \
+  --verify-output
+
+## 播放转换结果
+# 常用按键：
+# Space：暂停/继续
+# ←/→：前后移动一帧
+# ↑/↓：前后移动一秒
+# R：回到起点
+# [ / ]：降低/提高播放速度
+# L：切换循环播放
+# C：显示/隐藏碰撞体
+# Q：退出
+.venv/bin/python -m humanoidverse.tools.play_robot_state_npz \
+  --npz humanoidverse/data/mini3_robot_state_npz/zoidberg_scuttle_R_001__A528.npz
+
+## 播放转换前的原始 CSV
+.venv/bin/python -m humanoidverse.tools.play_mini3_csv \
+  --csv humanoidverse/data/csv/231121/zoidberg_scuttle_R_001__A528.csv
+
+.venv/bin/python -m humanoidverse.tools.play_mini3_csv \
+  --csv humanoidverse/data/csv/221125/jog_ff_loop_180_R_003__A073_M.csv \
+  --compare-npz humanoidverse/data/mini3_robot_state_npz/jog_ff_loop_180_R_003__A073_M.npz
+
+## 直接播放 flat PKL（直接读取 root_rot，不从欧拉角重建）
+.venv/bin/python -m humanoidverse.tools.play_mini3_pkl \
+  --pkl humanoidverse/data/pkl/231121/zoidberg_scuttle_R_001__A528.pkl
+
+## 直接把 flat PKL 转成训练格式（不经过 CSV/NPZ）
+# root_rot 按 xyzw 直接读取；输出为 MotionLib 可惰性加载的约 10 秒 UFO PKL。
+# 命令中断后使用相同参数重新执行即可复用已有输出。
+.venv/bin/python -m humanoidverse.tools.convert_mini3_pkl \
+  --input humanoidverse/data/pkl \
+  --output-dir humanoidverse/data/mini3_pkl_ufo \
+  --manifest configs/data/mini3_pkl.yaml
+
+## 使用转换后的 Mini3 PKL 训练
+./run_train.sh \
+  --agent fb \
+  --data-manifest configs/data/mini3_pkl.yaml \
+  --gpu-ids single \
+  --work-dir runs/ufo_fb_mini3
+```
 
 
 ### 4. FB 训练

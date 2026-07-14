@@ -105,8 +105,5 @@ def robot_state_dict_to_ufo_motion_dict(
     source_name: str,
 ) -> dict[str, Any]:
     validated = validate_robot_state_dict(data, robot_spec, source_name)
-    converted = {
-        motion_key: robot_state_to_ufo_motion(motion, robot_spec, source_name)
-        for motion_key, motion in validated.items()
-    }
+    converted = {motion_key: robot_state_to_ufo_motion(motion, robot_spec, source_name) for motion_key, motion in validated.items()}
     return validate_ufo_motion_dict(converted, source_name)

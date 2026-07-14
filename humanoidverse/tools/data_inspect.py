@@ -1,4 +1,4 @@
-"""Inspect robot_state CSV/NPZ files before building a UFO motion manifest."""
+"""Inspect robot_state CSV/NPZ/flat-PKL files before building a UFO motion manifest."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import numpy as np
 from omegaconf import OmegaConf
 
 from humanoidverse.utils.motion_data.adapters import expand_motion_paths
+from humanoidverse.utils.motion_data.robot_state_readers import read_robot_state_pkl
 from humanoidverse.utils.robot_spec import RobotSpec, load_robot_spec
-
 
 ROOT_POS_ALIASES = [
     ["root_pos_x", "root_pos_y", "root_pos_z"],
@@ -370,6 +370,50 @@ def detect_npz_layout(path: Path, robot_spec: RobotSpec, *, fps: float | None = 
     )
 
 
+def _inspect_pkl_file(
+    path: Path,
+    robot_spec: RobotSpec,
+    *,
+    fps: float | None,
+    clip_seconds: float,
+    stride_seconds: float | None,
+    keep_short: bool,
+    min_clip_seconds: float,
+) -> FileInspection:
+    motions = read_robot_state_pkl(
+        path,
+        source_name="data_inspect",
+        robot_spec=robot_spec,
+        fps=fps,
+        root_quat_order="xyzw",
+    )
+    if len(motions) != 1:
+        raise ValueError(f"robot_state_pkl file={path} must contain exactly one flat motion")
+    motion = next(iter(motions.values()))
+    frames = int(motion.root_pos.shape[0])
+    return FileInspection(
+        path=path,
+        frames=frames,
+        fps=motion.fps,
+        duration_seconds=frames / motion.fps,
+        estimated_clip_count=estimate_clip_count(
+            frames,
+            motion.fps,
+            clip_seconds=clip_seconds,
+            stride_seconds=stride_seconds,
+            keep_short=keep_short,
+            min_clip_seconds=min_clip_seconds,
+        ),
+        root_pos_columns=["root_pos"],
+        root_quat_columns=["root_rot"],
+        dof_pos_mode="xml_order",
+        notes=[
+            "root_rot is read directly as xyzw; no CSV Euler-angle reconstruction is performed.",
+            "Without joint_names, dof_pos is assumed to follow RobotSpec.control_joint_names.",
+        ],
+    )
+
+
 def _infer_format(source: str, fmt: str) -> str:
     if fmt != "auto":
         return fmt
@@ -378,7 +422,9 @@ def _infer_format(source: str, fmt: str) -> str:
         return "robot_state_csv"
     if suffix == ".npz":
         return "robot_state_npz"
-    raise ValueError(f"Cannot infer format from source={source!r}; pass --format robot_state_csv or robot_state_npz")
+    if suffix == ".pkl":
+        return "robot_state_pkl"
+    raise ValueError(f"Cannot infer format from source={source!r}; pass --format robot_state_csv, robot_state_npz, or robot_state_pkl")
 
 
 def inspect_data_source(
@@ -397,10 +443,15 @@ def inspect_data_source(
     robot_spec = load_robot_spec(robot_config)
     source_for_format = source[0] if isinstance(source, list) else source
     resolved_format = _infer_format(str(source_for_format), fmt)
-    suffix = ".csv" if resolved_format == "robot_state_csv" else ".npz" if resolved_format == "robot_state_npz" else ""
+    suffix_by_format = {
+        "robot_state_csv": ".csv",
+        "robot_state_npz": ".npz",
+        "robot_state_pkl": ".pkl",
+    }
+    suffix = suffix_by_format.get(resolved_format, "")
     if not suffix:
-        raise ValueError(f"data_inspect supports robot_state_csv and robot_state_npz, got {resolved_format}")
-    paths = expand_motion_paths(source, suffix=suffix)
+        raise ValueError(f"data_inspect supports {sorted(suffix_by_format)}, got {resolved_format}")
+    paths = expand_motion_paths(source, suffix=suffix, recursive=resolved_format == "robot_state_pkl")
 
     files: list[FileInspection] = []
     manifest_columns: dict[str, Any] = {}
@@ -424,10 +475,24 @@ def inspect_data_source(
             manifest_columns["root_quat"] = first.root_quat_columns
         if first.dof_pos_mode is not None:
             manifest_columns["dof_pos"] = first.dof_pos_mode
-    else:
+    elif resolved_format == "robot_state_npz":
         for path in paths:
             files.append(
                 _inspect_npz_file(
+                    path,
+                    robot_spec,
+                    fps=fps,
+                    clip_seconds=clip_seconds,
+                    stride_seconds=stride_seconds,
+                    keep_short=keep_short,
+                    min_clip_seconds=min_clip_seconds,
+                )
+            )
+    else:
+        manifest_columns["root_quat_order"] = "xyzw"
+        for path in paths:
+            files.append(
+                _inspect_pkl_file(
                     path,
                     robot_spec,
                     fps=fps,
@@ -460,13 +525,14 @@ def inspect_data_source(
     if manifest_columns:
         suggested_dataset["columns"] = manifest_columns
     suggested = {"robot_config": str(robot_config), "datasets": [suggested_dataset]}
+    first_file = files[0]
     return DataInspection(
         format=resolved_format,
         source_paths=paths,
         files=files,
-        root_pos_columns=manifest_columns.get("root_pos"),
-        root_quat_columns=manifest_columns.get("root_quat"),
-        dof_pos_mode=manifest_columns.get("dof_pos") or ("npz" if resolved_format == "robot_state_npz" else None),
+        root_pos_columns=manifest_columns.get("root_pos") or first_file.root_pos_columns,
+        root_quat_columns=manifest_columns.get("root_quat") or first_file.root_quat_columns,
+        dof_pos_mode=manifest_columns.get("dof_pos") or first_file.dof_pos_mode,
         manifest_columns=manifest_columns,
         suggested_manifest=suggested,
     )
@@ -497,8 +563,12 @@ def _print_report(result: DataInspection) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", required=True, help="Robot YAML path")
-    parser.add_argument("--source", required=True, nargs="+", help="CSV/NPZ source path, directory, or glob")
-    parser.add_argument("--format", default="auto", choices=["auto", "robot_state_csv", "robot_state_npz"])
+    parser.add_argument("--source", required=True, nargs="+", help="CSV/NPZ/flat-PKL source path, directory, or glob")
+    parser.add_argument(
+        "--format",
+        default="auto",
+        choices=["auto", "robot_state_csv", "robot_state_npz", "robot_state_pkl"],
+    )
     parser.add_argument("--fps", type=float, default=None)
     parser.add_argument("--clip-seconds", type=float, default=10.0)
     parser.add_argument("--stride-seconds", type=float, default=None)

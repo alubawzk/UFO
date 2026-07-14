@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 from loguru import logger
 
@@ -271,4 +272,77 @@ def read_robot_state_npz(
                 source=source_name,
                 metadata={"path": str(path), "reader": "robot_state_npz"},
             )
+    return validate_robot_state_dict(data, robot_spec, source_name)
+
+
+def _root_quat_to_robot_order(root_rot: np.ndarray, source_order: str, target_order: str, path: Path) -> np.ndarray:
+    if source_order not in {"xyzw", "wxyz"}:
+        raise ValueError(f"robot_state_pkl file={path} has unsupported source root quaternion order={source_order!r}")
+    if target_order not in {"xyzw", "wxyz"}:
+        raise ValueError(f"robot_state_pkl file={path} has unsupported RobotSpec root quaternion order={target_order!r}")
+    if source_order == target_order:
+        return root_rot
+    if source_order == "wxyz":
+        return root_rot[:, [1, 2, 3, 0]]
+    return root_rot[:, [3, 0, 1, 2]]
+
+
+def _fps_from_pkl(payload: dict[str, Any], path: Path, fps: float | int | None) -> float:
+    value = payload.get("fps") if fps is None else fps
+    if value is None:
+        raise ValueError(f"robot_state_pkl file={path} requires an fps field or manifest fps")
+    array = np.asarray(value)
+    if array.size != 1:
+        raise ValueError(f"robot_state_pkl file={path} fps must be scalar, got shape={array.shape}")
+    motion_fps = float(array.reshape(-1)[0])
+    if not np.isfinite(motion_fps) or motion_fps <= 0.0:
+        raise ValueError(f"robot_state_pkl file={path} has invalid fps={motion_fps}")
+    return motion_fps
+
+
+def read_robot_state_pkl(
+    path_spec: str | os.PathLike[str] | list[str],
+    *,
+    source_name: str,
+    robot_spec: RobotSpec,
+    base_dir: Path | None = None,
+    fps: float | int | None = None,
+    root_quat_order: str = "xyzw",
+) -> dict[str, RobotStateMotion]:
+    """Read flat PKLs containing root_pos/root_rot/dof_pos without Euler reconstruction."""
+
+    data: dict[str, RobotStateMotion] = {}
+    for path in expand_motion_paths(path_spec, base_dir=base_dir, suffix=".pkl", recursive=True):
+        payload = joblib.load(path)
+        if not isinstance(payload, dict):
+            raise ValueError(f"robot_state_pkl source={source_name}, file={path}: expected a flat dict")
+        missing = [field for field in ("root_pos", "root_rot", "dof_pos") if field not in payload]
+        if missing:
+            raise ValueError(f"robot_state_pkl source={source_name}, file={path}: missing fields {missing}")
+
+        root_rot = np.asarray(payload["root_rot"])
+        if root_rot.ndim != 2 or root_rot.shape[1] != 4:
+            raise ValueError(f"robot_state_pkl file={path} root_rot must have shape [T, 4], got {root_rot.shape}")
+        root_quat = _root_quat_to_robot_order(root_rot, root_quat_order, robot_spec.root_quat_order, path)
+        joint_names = _string_list_from_npz(payload["joint_names"]) if payload.get("joint_names") is not None else None
+
+        motion_key = path.stem
+        if motion_key in data:
+            raise ValueError(f"Duplicate motion_key={motion_key} while reading robot_state_pkl source={source_name}")
+        data[motion_key] = RobotStateMotion(
+            motion_key=motion_key,
+            root_pos=np.asarray(payload["root_pos"]),
+            root_quat=root_quat,
+            dof_pos=np.asarray(payload["dof_pos"]),
+            fps=_fps_from_pkl(payload, path, fps),
+            joint_names=joint_names,
+            source=source_name,
+            metadata={
+                "path": str(path),
+                "reader": "robot_state_pkl",
+                "source_keys": [str(key) for key in payload],
+                "source_root_quat_order": root_quat_order,
+                "root_rotation_source": "direct root_rot field",
+            },
+        )
     return validate_robot_state_dict(data, robot_spec, source_name)

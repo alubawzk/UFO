@@ -27,3 +27,6 @@ model/
 humanoidverse/data/lafan_29dof_10s-clipped.pkl
 humanoidverse/data/lafan_29dof.pkl
 humanoidverse/data/csv/
+humanoidverse/data/pkl/
+humanoidverse/data/mini3_robot_state_npz/
+humanoidverse/data/mini3_pkl_ufo/

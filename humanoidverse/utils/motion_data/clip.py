@@ -82,7 +82,6 @@ def clip_ufo_motion_dict(
 
     if not clipped_data:
         raise ValueError(
-            f"No motion clips were generated for source={source_name!r}. "
-            f"Try keep_short=true or min_clip_seconds <= shortest motion length."
+            f"No motion clips were generated for source={source_name!r}. Try keep_short=true or min_clip_seconds <= shortest motion length."
         )
     return validate_ufo_motion_dict(clipped_data, source_name or "clip")

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import re
+import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from humanoidverse.utils.motion_data.adapters import (
 from humanoidverse.utils.motion_data.clip import clip_ufo_motion_dict
 from humanoidverse.utils.motion_data.schema import format_fps_distribution, validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import RobotSpec, load_robot_spec
+
+PER_MOTION_DIRECTORY_INDEX = "_ufo_per_motion_index.json"
 
 
 @dataclass(frozen=True)
@@ -67,9 +70,7 @@ def _load_manifest(manifest_path: str | Path) -> tuple[Path, dict[str, Any], lis
         has_train_path = "train_path" in item
         has_auto_build = "source_path" in item and "auto_build" in item
         if not has_train_path and not has_auto_build:
-            raise ValueError(
-                f"Motion data manifest dataset #{idx} must define either train_path or source_path + auto_build"
-            )
+            raise ValueError(f"Motion data manifest dataset #{idx} must define either train_path or source_path + auto_build")
         if "source_path" in item and "auto_build" not in item:
             raise ValueError(f"Motion data manifest dataset #{idx} uses source_path but is missing auto_build")
         normalized.append(dict(item))
@@ -160,6 +161,42 @@ def _load_cache(cache_path: Path, source_name: str) -> dict[str, Any]:
     return validate_ufo_motion_dict(data, source_name)
 
 
+def _prepare_per_motion_directory(path_spec: Any, manifest_dir: Path, source_name: str) -> str:
+    if not isinstance(path_spec, (str, Path)):
+        raise ValueError(f"Dataset {source_name} storage=per_motion_directory requires one directory path")
+    directory = _resolve_existing_path(path_spec, manifest_dir)
+    if not directory.is_dir():
+        raise ValueError(f"Dataset {source_name} per-motion UFO path is not a directory: {directory}")
+    index_path = directory / PER_MOTION_DIRECTORY_INDEX
+    if not index_path.is_file():
+        raise ValueError(
+            f"Dataset {source_name} is missing {PER_MOTION_DIRECTORY_INDEX}; build it with humanoidverse.tools.convert_mini3_pkl"
+        )
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Dataset {source_name} has an invalid per-motion index: {index_path}") from exc
+    if index.get("format") != "ufo_per_motion_directory_v1" or index.get("status") != "complete":
+        raise ValueError(
+            f"Dataset {source_name} per-motion index must be complete ufo_per_motion_directory_v1, "
+            f"got format={index.get('format')!r}, status={index.get('status')!r}"
+        )
+
+    files = sorted(directory.glob("*.pkl"))
+    expected_count = int(index.get("motion_files", -1))
+    if not files or expected_count != len(files):
+        raise ValueError(f"Dataset {source_name} per-motion directory count mismatch: index={expected_count}, files={len(files)}")
+    sample_indices = sorted({0, len(files) // 2, len(files) - 1})
+    for sample_index in sample_indices:
+        path = files[sample_index]
+        data = joblib.load(path)
+        validated = validate_ufo_motion_dict(data, f"{source_name}:{path.name}")
+        if list(validated) != [path.stem]:
+            raise ValueError(f"Per-motion UFO file={path} must contain exactly one record whose key matches the filename stem")
+    logger.info(f"[motion-manifest] dataset={source_name} storage=per_motion_directory path={directory} motions={len(files)} cache=lazy")
+    return str(directory)
+
+
 def _prepare_dataset_path(
     dataset: dict[str, Any],
     *,
@@ -175,6 +212,14 @@ def _prepare_dataset_path(
     path_spec, used_train_fallback = _source_path_for_split(dataset, split, fallback_to_train=fallback_to_train)
     source_name = f"{dataset_name}:{split}"
     fps = dataset.get("fps")
+
+    storage = dataset.get("storage")
+    if storage is not None and storage != "per_motion_directory":
+        raise ValueError(f"Dataset {dataset_name} has unsupported storage={storage!r}")
+    if storage == "per_motion_directory":
+        if fmt != "ufo_pkl":
+            raise ValueError(f"Dataset {dataset_name} storage=per_motion_directory requires format=ufo_pkl")
+        return _prepare_per_motion_directory(path_spec, manifest_dir, source_name)
 
     if fmt == "ufo_pkl":
         paths = expand_motion_paths(path_spec, base_dir=manifest_dir, suffix=".pkl")

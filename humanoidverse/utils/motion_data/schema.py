@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-
 REQUIRED_MOTION_FIELDS = ("root_trans_offset", "pose_aa", "fps")
 
 

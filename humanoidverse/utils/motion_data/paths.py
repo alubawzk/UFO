@@ -37,6 +37,7 @@ def expand_motion_paths(
     *,
     base_dir: Path | None = None,
     suffix: str,
+    recursive: bool = False,
 ) -> list[Path]:
     """Resolve a path, directory, glob, or list of those into concrete files."""
 
@@ -47,9 +48,10 @@ def expand_motion_paths(
         for candidate in _candidate_patterns(raw, base_dir):
             candidate_str = str(candidate)
             if glob.has_magic(candidate_str):
-                found_for_raw = [Path(item) for item in sorted(glob.glob(candidate_str))]
+                found_for_raw = [Path(item) for item in sorted(glob.glob(candidate_str, recursive=recursive))]
             elif candidate.is_dir():
-                found_for_raw = sorted(candidate.glob(f"*{suffix}"))
+                iterator = candidate.rglob(f"*{suffix}") if recursive else candidate.glob(f"*{suffix}")
+                found_for_raw = sorted(iterator)
             elif candidate.exists():
                 found_for_raw = [candidate]
             if found_for_raw:
