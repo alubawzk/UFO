@@ -50,6 +50,7 @@ cd UFO
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source ~/.local/bin/env
+source .venv/bin/activate
 ```
 
 或者：
