@@ -1,0 +1,28 @@
+{
+  "conversion": {
+    "clip_seconds": 10.0,
+    "compression": 3,
+    "fps_override": null,
+    "joint_limit_tolerance_degrees": 0.01,
+    "keep_short": true,
+    "min_clip_seconds": 1.0,
+    "quat_norm_tolerance": 0.001,
+    "robot_config": "configs/robots/mini3.yaml",
+    "robot_name": "mini3",
+    "root_quat_order": "xyzw",
+    "root_rotation_source": "direct root_rot field",
+    "source_files": 77,
+    "source_selection_sha256": "8a42b26708a9ae23162c80025363c48bde611b9c98172f2585d075d7be9e3c59",
+    "stride_seconds": 10.0
+  },
+  "converted_source_files": 77,
+  "elapsed_seconds": 4.406716699999379,
+  "failed_source_files": 0,
+  "format": "ufo_per_motion_directory_v1",
+  "motion_files": 1692,
+  "output_duration_seconds": 16555.56777600043,
+  "output_frames": 496672,
+  "processed_source_files": 77,
+  "skipped_short_files": 0,
+  "status": "complete"
+}

@@ -159,7 +159,7 @@ UV_NO_SYNC=1 ./run_train.sh \
 
 ## 直接播放 flat PKL（直接读取 root_rot，不从欧拉角重建）
 .venv/bin/python -m humanoidverse.tools.play_mini3_pkl \
-  --pkl humanoidverse/data/pkl/231121/zoidberg_scuttle_R_001__A528.pkl
+  --pkl humanoidverse/data/lafan1_mini3/dance1_subject2.pkl
 
 ## 直接把 flat PKL 转成训练格式（不经过 CSV/NPZ）
 # root_rot 按 xyzw 直接读取；输出为 MotionLib 可惰性加载的约 10 秒 UFO PKL。

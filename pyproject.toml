@@ -29,13 +29,19 @@ dependencies = [
     "safetensors>=0.5.3",
     "tensordict>=0.8.3",
     "termcolor>=3.0.1",
-    "torch>=2.7.0,<2.8.0",
+    "torch==2.7.1",
     "torchrunx>=0.3.4",
+    "torchvision==0.22.1",
     "wandb>=0.26.0",
 ]
 
 [[tool.uv.index]]
-url = "https://pypi.nvidia.com/"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 # sim2real = [
 #     "unitree-sdk2py",
@@ -46,6 +52,9 @@ url = "https://pypi.nvidia.com/"
 
 [tool.setuptools]
 include-package-data = true
+
+[[tool.uv.index]]
+url = "https://pypi.nvidia.com/"
 
 [tool.setuptools.package-data]
 humanoidverse = ["config/**/*", "data/**/*"]

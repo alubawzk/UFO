@@ -120,14 +120,14 @@ xpos_bodies = [
 ]
 
 def get_backward_observation(env, motion_id, include_last_action, velocity_multiplier: float = 1.0) -> torch.Tensor:
-    import numpy as np
     from humanoidverse.envs.motion_observations import (
         compute_humanoid_observations_max,
         compute_humanoid_observations_max_with_contact,
     )
     from humanoidverse.utils.torch_utils import quat_rotate_inverse
 
-    motion_times = torch.arange(int(np.ceil((env._motion_lib._motion_lengths[motion_id] / env.dt).cpu()))).to(env.device) * env.dt
+    sample_count = int(env._motion_lib.get_expert_sample_count(motion_id, env.dt).cpu())
+    motion_times = torch.arange(sample_count, device=env.device) * env.dt
     # motion_times = torch.arange(0, env._motion_lib._motion_num_frames.item() * frame_interval, frame_interval, device=env.device)
 
     # get blend motion state

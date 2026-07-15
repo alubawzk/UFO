@@ -1,0 +1,7 @@
+robot_config: configs/robots/mini3.yaml
+datasets:
+- name: lafan1_mini3
+  format: ufo_pkl
+  train_path: humanoidverse/data/lafan1_mini3_ufo
+  storage: per_motion_directory
+  weight: 1.0

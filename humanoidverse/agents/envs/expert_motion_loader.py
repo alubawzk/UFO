@@ -1,12 +1,11 @@
 """Expert trajectory loading helpers shared by MJLab training."""
 
-import numpy as np
 import torch
 
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
-from humanoidverse.utils.torch_utils import quat_rotate_inverse
 from humanoidverse.utils.reference_observations import reference_base_ang_vel
+from humanoidverse.utils.torch_utils import quat_rotate_inverse
 
 from ..buffers.trajectory import TrajectoryDictBuffer
 
@@ -19,7 +18,8 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
     history_handler = HVHistoryHandler(1, env.config.obs.obs_auxiliary, env.config.obs.obs_dims, device)
     history_config = env.config.obs.obs_auxiliary["history_actor"]
     for i in range(env._motion_lib._num_unique_motions):
-        motion_times = torch.arange(int(np.ceil((env._motion_lib._motion_lengths[i] / env.dt).cpu()))).to(env.device) * env.dt
+        sample_count = int(env._motion_lib.get_expert_sample_count(i, env.dt).cpu())
+        motion_times = torch.arange(sample_count, device=env.device) * env.dt
         motion_id = torch.tensor([i]).to(env.device).repeat(motion_times.shape[0])
         motion_res = env._motion_lib.get_motion_state(motion_id, motion_times)
         file_names.append(env._motion_lib._motion_data_keys[i])

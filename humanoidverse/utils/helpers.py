@@ -2,7 +2,6 @@ import os
 import copy
 import torch
 from torch import nn
-import numpy as np
 import random
 
 from typing import Any, List, Dict
@@ -159,7 +158,8 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
     from humanoidverse.utils.torch_utils import quat_rotate_inverse
     from humanoidverse.envs.motion_observations import compute_humanoid_observations_max, compute_humanoid_observations_max_with_contact
     
-    motion_times = torch.arange(int(np.ceil((env._motion_lib._motion_lengths[motion_id]/env.dt).cpu()))).to(env.device) * env.dt
+    sample_count = int(env._motion_lib.get_expert_sample_count(motion_id, env.dt).cpu())
+    motion_times = torch.arange(sample_count, device=env.device) * env.dt
     
     # get blend motion state
     motion_state = env._motion_lib.get_motion_state(motion_id, motion_times)

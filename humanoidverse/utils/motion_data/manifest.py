@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from dataclasses import dataclass
@@ -20,10 +19,14 @@ from humanoidverse.utils.motion_data.adapters import (
     load_ufo_pkl,
 )
 from humanoidverse.utils.motion_data.clip import clip_ufo_motion_dict
+from humanoidverse.utils.motion_data.per_motion_index import (
+    PER_MOTION_DIRECTORY_INDEX,
+    PER_MOTION_DIRECTORY_INDEX_V2,
+    load_per_motion_directory_index,
+    v2_indexed_motion_paths,
+)
 from humanoidverse.utils.motion_data.schema import format_fps_distribution, validate_ufo_motion_dict
 from humanoidverse.utils.robot_spec import RobotSpec, load_robot_spec
-
-PER_MOTION_DIRECTORY_INDEX = "_ufo_per_motion_index.json"
 
 
 @dataclass(frozen=True)
@@ -172,23 +175,35 @@ def _prepare_per_motion_directory(path_spec: Any, manifest_dir: Path, source_nam
         raise ValueError(
             f"Dataset {source_name} is missing {PER_MOTION_DIRECTORY_INDEX}; build it with humanoidverse.tools.convert_mini3_pkl"
         )
-    try:
-        index = json.loads(index_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Dataset {source_name} has an invalid per-motion index: {index_path}") from exc
-    if index.get("format") != "ufo_per_motion_directory_v1" or index.get("status") != "complete":
-        raise ValueError(
-            f"Dataset {source_name} per-motion index must be complete ufo_per_motion_directory_v1, "
-            f"got format={index.get('format')!r}, status={index.get('status')!r}"
-        )
-
-    files = sorted(directory.glob("*.pkl"))
+    index = load_per_motion_directory_index(directory)
+    if index is None:
+        raise ValueError(f"Dataset {source_name} is missing {PER_MOTION_DIRECTORY_INDEX}: {directory}")
+    index_format = index.get("format")
     expected_count = int(index.get("motion_files", -1))
-    if not files or expected_count != len(files):
-        raise ValueError(f"Dataset {source_name} per-motion directory count mismatch: index={expected_count}, files={len(files)}")
+    if index_format == PER_MOTION_DIRECTORY_INDEX_V2:
+        motions = index["motions"]
+        files = v2_indexed_motion_paths(directory, index)
+        assert files is not None
+        for motion in motions:
+            motion_key = str(motion["motion_key"])
+            fps = float(motion.get("fps", math.nan))
+            frame_count = int(motion.get("frame_count", 0))
+            motion_length = float(motion.get("motion_length", math.nan))
+            expected_length = (frame_count - 1) / fps if fps > 0.0 else math.nan
+            if not math.isfinite(fps) or fps <= 0.0 or frame_count <= 0:
+                raise ValueError(f"Dataset {source_name} has invalid fps/frame_count for motion_key={motion_key!r}")
+            if not math.isclose(motion_length, expected_length, rel_tol=0.0, abs_tol=1.0e-9):
+                raise ValueError(f"Dataset {source_name} has invalid motion_length for motion_key={motion_key!r}")
+    else:
+        files = sorted(directory.glob("*.pkl"))
+        if not files or expected_count != len(files):
+            raise ValueError(f"Dataset {source_name} per-motion directory count mismatch: index={expected_count}, files={len(files)}")
+
     sample_indices = sorted({0, len(files) // 2, len(files) - 1})
     for sample_index in sample_indices:
         path = files[sample_index]
+        if not path.is_file():
+            raise ValueError(f"Dataset {source_name} indexed motion file does not exist: {path}")
         data = joblib.load(path)
         validated = validate_ufo_motion_dict(data, f"{source_name}:{path.name}")
         if list(validated) != [path.stem]:

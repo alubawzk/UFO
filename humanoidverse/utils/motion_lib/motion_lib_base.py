@@ -7,6 +7,14 @@ import torch.multiprocessing as mp
 import random
 
 from enum import Enum
+from humanoidverse.utils.motion_data.per_motion_index import v2_indexed_motion_paths
+from humanoidverse.utils.motion_data.resample import target_frame_count
+from humanoidverse.utils.motion_data.time_grid import (
+    LEGACY_EXPERT_CONSUMER_CONTRACT,
+    RESAMPLING_ALGORITHM,
+    RESAMPLING_SCHEMA_VERSION,
+    legacy_expert_sample_count,
+)
 from humanoidverse.utils.motion_lib.skeleton import SkeletonTree
 from pathlib import Path
 from easydict import EasyDict
@@ -60,6 +68,54 @@ def _dof_vel_from_dof_pos(dof_pos, dt):
         return torch.zeros_like(dof_pos)
     dof_vel = (dof_pos[1:] - dof_pos[:-1]) / dt
     return torch.cat([dof_vel, dof_vel[-1:]], dim=0)
+
+
+def _motion_files_from_directory(directory):
+    indexed_paths = v2_indexed_motion_paths(directory)
+    if indexed_paths is not None:
+        return [str(path) for path in indexed_paths]
+    return sorted(glob.glob(osp.join(str(directory), "*.pkl")))
+
+
+def _expert_grid_contract_from_motion_file(motion_file_data, num_frames, loaded_fps):
+    metadata = motion_file_data.get("metadata")
+    resampling = metadata.get("resampling") if isinstance(metadata, dict) else None
+    if not isinstance(resampling, dict) or resampling.get("consumer_contract") != LEGACY_EXPERT_CONSUMER_CONTRACT:
+        return -1, float("nan")
+    if resampling.get("algorithm") != RESAMPLING_ALGORITHM:
+        raise ValueError(f"Invalid resampling algorithm={resampling.get('algorithm')!r}")
+    if int(resampling.get("schema_version", -1)) != RESAMPLING_SCHEMA_VERSION:
+        raise ValueError(f"Invalid resampling schema_version={resampling.get('schema_version')!r}")
+    if int(resampling.get("target_frame_count", -1)) != int(num_frames):
+        raise ValueError(f"Resampled target_frame_count does not match loaded frames={num_frames}")
+    if num_frames < 2:
+        raise ValueError(f"Resampled expert motion must contain at least two frames, got {num_frames}")
+
+    target_fps = float(resampling.get("target_fps", float("nan")))
+    source_fps = float(resampling.get("source_fps", float("nan")))
+    source_frame_count = int(resampling.get("source_frame_count", -1))
+    sample_count = int(resampling.get("legacy_expert_sample_count", -1))
+    control_dt = float(resampling.get("expert_control_dt_seconds", float("nan")))
+    if not np.isfinite(target_fps) or target_fps <= 0.0 or not np.isclose(target_fps, loaded_fps, rtol=0.0, atol=1.0e-12):
+        raise ValueError(f"Resampled target_fps={target_fps} does not match loaded fps={loaded_fps}")
+    if not np.isfinite(source_fps) or source_fps <= 0.0 or source_frame_count < 2:
+        raise ValueError(f"Invalid resampled source fps/frame_count={source_fps}/{source_frame_count}")
+    expected_target_frame_count = target_frame_count(source_frame_count, source_fps, target_fps)
+    if num_frames != expected_target_frame_count:
+        raise ValueError(
+            f"Resampled target frame count={num_frames} does not match recomputed count={expected_target_frame_count}"
+        )
+    if sample_count <= 0 or sample_count > num_frames:
+        raise ValueError(f"Invalid resampled expert sample count={sample_count} for num_frames={num_frames}")
+    if not np.isfinite(control_dt) or control_dt <= 0.0:
+        raise ValueError(f"Invalid resampled expert control dt={control_dt}")
+    expected_control_dt = 1.0 / target_fps
+    if not np.isclose(control_dt, expected_control_dt, rtol=0.0, atol=1.0e-12):
+        raise ValueError(f"Resampled expert control dt={control_dt} does not match 1/target_fps={expected_control_dt}")
+    expected_sample_count = legacy_expert_sample_count(source_frame_count, source_fps, control_dt)
+    if sample_count != expected_sample_count:
+        raise ValueError(f"Resampled expert sample count={sample_count} does not match recomputed count={expected_sample_count}")
+    return sample_count, control_dt
 
 
 class MotionLibBase():
@@ -128,7 +184,7 @@ class MotionLibBase():
                     data_values.extend([v for _, v in items])
                     source_ids.extend([source_idx] * len(items))
                 else:
-                    source_files = sorted(glob.glob(osp.join(source_path, "*.pkl")))
+                    source_files = _motion_files_from_directory(source_path)
                     data_keys.extend(source_files)
                     data_values.extend(source_files)
                     source_ids.extend([source_idx] * len(source_files))
@@ -161,7 +217,7 @@ class MotionLibBase():
             self._motion_data_load = joblib.load(motion_file)
         else:
             self.mode = MotionlibMode.directory
-            self._motion_data_load = glob.glob(osp.join(motion_file, "*.pkl"))
+            self._motion_data_load = _motion_files_from_directory(motion_file)
         
         data_list = self._motion_data_load
         if self.mode == MotionlibMode.file:
@@ -524,6 +580,8 @@ class MotionLibBase():
         _motion_fps = []
         _motion_dt = []
         _motion_num_frames = []
+        _motion_expert_sample_counts = []
+        _motion_expert_control_dts = []
         _motion_bodies = []
         _motion_aa = []
         has_action = False
@@ -587,7 +645,7 @@ class MotionLibBase():
         
         for f in track(range(len(res_acc)), description="Processing motions..."):
             motion_file_data, curr_motion = res_acc[f]
-            motion_fps = curr_motion.fps
+            motion_fps = float(np.asarray(motion_file_data["fps"]).reshape(-1)[0])
             curr_dt = 1.0 / motion_fps
             num_frames = curr_motion.global_rotation.shape[0]
             curr_len = 1.0 / motion_fps * (num_frames - 1)
@@ -602,6 +660,11 @@ class MotionLibBase():
             _motion_fps.append(motion_fps)
             _motion_dt.append(curr_dt)
             _motion_num_frames.append(num_frames)
+            expert_sample_count, expert_control_dt = _expert_grid_contract_from_motion_file(
+                motion_file_data, num_frames, motion_fps
+            )
+            _motion_expert_sample_counts.append(expert_sample_count)
+            _motion_expert_control_dts.append(expert_control_dt)
             motions.append(curr_motion)
             _motion_lengths.append(curr_len)
             if self.has_action:
@@ -618,6 +681,8 @@ class MotionLibBase():
             self._motion_smpl_poses = torch.cat(_motion_smpl_poses, dim=0).float().to(self._device)
         self._motion_dt = torch.tensor(_motion_dt, device=self._device, dtype=torch.float32)
         self._motion_num_frames = torch.tensor(_motion_num_frames, device=self._device)
+        self._motion_expert_sample_counts = torch.tensor(_motion_expert_sample_counts, device=self._device, dtype=torch.int64)
+        self._motion_expert_control_dts = torch.tensor(_motion_expert_control_dts, device=self._device, dtype=torch.float32)
         
         if self.has_action:
             self._motion_actions = torch.cat(_motion_actions, dim=0).float().to(self._device)
@@ -752,10 +817,22 @@ class MotionLibBase():
         return sum(self._motion_lengths)
 
     def get_motion_num_steps(self, motion_ids=None):
-        if motion_ids is None:
-            return (self._motion_num_frames * self._sim_fps / self._motion_fps).ceil().int()
-        else:
-            return (self._motion_num_frames[motion_ids] * self._sim_fps / self._motion_fps[motion_ids]).ceil().int()
+        return self.get_expert_sample_count(motion_ids, control_dt=1.0 / self._sim_fps).int()
+
+    def get_expert_sample_count(self, motion_ids=None, control_dt=None):
+        """Return legacy control-grid counts, honoring offline-resampling metadata."""
+        control_dt = 1.0 / self._sim_fps if control_dt is None else float(control_dt)
+        if not np.isfinite(control_dt) or control_dt <= 0.0:
+            raise ValueError(f"control_dt must be finite and positive, got {control_dt}")
+        lengths = self._motion_lengths if motion_ids is None else self._motion_lengths[motion_ids]
+        default_counts = torch.ceil(lengths / control_dt).to(dtype=torch.int64)
+        if not hasattr(self, "_motion_expert_sample_counts"):
+            return default_counts
+        stored_counts = self._motion_expert_sample_counts if motion_ids is None else self._motion_expert_sample_counts[motion_ids]
+        stored_dts = self._motion_expert_control_dts if motion_ids is None else self._motion_expert_control_dts[motion_ids]
+        expected_dt = torch.as_tensor(control_dt, device=stored_dts.device, dtype=stored_dts.dtype)
+        matches = (stored_counts > 0) & torch.isclose(stored_dts, expected_dt, rtol=0.0, atol=1.0e-7)
+        return torch.where(matches, stored_counts, default_counts)
 
     def sample_time(self, motion_ids, truncate_time=None):
         n = len(motion_ids)
