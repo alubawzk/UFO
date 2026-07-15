@@ -9,7 +9,6 @@ from omegaconf import OmegaConf
 
 from humanoidverse.utils.robot_spec import load_robot_training_spec
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROBOT_CONFIG = REPO_ROOT / "configs" / "robots" / "mini3.yaml"
 HYDRA_CONFIG = REPO_ROOT / "humanoidverse" / "config" / "robot" / "mini3" / "mini3_auto.yaml"
@@ -84,6 +83,10 @@ class Mini3RobotConfigTest(unittest.TestCase):
         self.assertEqual(robot.hands, [])
 
         self.assertEqual(training.hydra_robot, "mini3/mini3_auto")
+        self.assertEqual(
+            training.fb_aux_rewards_scaling,
+            {"penalty_action_rate": -0.2, "penalty_ankle_roll": -1.0},
+        )
         self.assertEqual(training.actuator["source"], "yaml")
         self.assertEqual(len(training.effort_limits), 21)
         self.assertEqual(len(training.velocity_limits), 21)

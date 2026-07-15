@@ -9,14 +9,22 @@ from unittest.mock import patch
 import torch
 from omegaconf import OmegaConf
 
-from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabCore
-from humanoidverse.train import _resolve_training_robot_config, build_ufo_mjlab_config, parse_args as parse_train_args
+from humanoidverse.agents.envs.humanoidverse_mjlab import (
+    HumanoidVerseMjlabCore,
+    _compose_humanoidverse_config,
+    _randomize_dc_motor_strength,
+    make_mjlab_ufo_env_cfg,
+)
 from humanoidverse.tracking_inference import (
     _expert_qpos_from_obs,
     _resolve_tracking_robot_config,
     _target_states_from_obs,
+)
+from humanoidverse.tracking_inference import (
     parse_args as parse_tracking_args,
 )
+from humanoidverse.train import _resolve_training_robot_config, build_ufo_mjlab_config
+from humanoidverse.train import parse_args as parse_train_args
 from humanoidverse.utils.robot_spec import load_robot_training_spec
 
 
@@ -113,6 +121,38 @@ def _write_tiny_robot_with_training(root: Path, *, missing_actuator_joint: bool 
     return robot_config
 
 
+def _make_mini3_mjlab_cfg(*, disable_domain_randomization: bool = False):
+    training = load_robot_training_spec("configs/robots/mini3.yaml")
+    hydra_overrides = [
+        f"robot={training.hydra_robot}",
+        f"robot.control.action_scale={training.action_scale}",
+        f"robot.control.action_clip_value={training.action_clip_value}",
+        f"robot.control.normalize_action_to={training.normalize_action_to}",
+        *training.hydra_overrides,
+    ]
+    hv_config, _ = _compose_humanoidverse_config(
+        num_envs=2,
+        relative_config_path="exp/bfm_zero/bfm_zero",
+        hydra_overrides=hydra_overrides,
+        lafan_tail_path="humanoidverse/data/mini3_pkl_ufo",
+        data_mix_weights=[1.0],
+        disable_obs_noise=False,
+        disable_domain_randomization=disable_domain_randomization,
+        max_episode_length_s=None,
+        root_height_obs=True,
+        robot_training=training.to_env_dict(),
+    )
+    mjlab_config = make_mjlab_ufo_env_cfg(
+        hv_config,
+        num_envs=2,
+        seed=1,
+        mjcf_path=training.robot.xml_path,
+        auto_reset=False,
+        robot_training=training.to_env_dict(),
+    )
+    return hv_config, mjlab_config
+
+
 class RobotConfigTrainingTest(unittest.TestCase):
     def test_old_g1_default_builds_cfg(self) -> None:
         cfg = build_ufo_mjlab_config(
@@ -141,6 +181,55 @@ class RobotConfigTrainingTest(unittest.TestCase):
             robot_config="configs/robots/g1_29dof.yaml",
         )
         self.assertTrue(str(cfg.env.robot_config_path).endswith("configs/robots/g1_29dof.yaml"))
+
+    def test_mini3_pd_gain_domain_randomization_builds_reset_event(self) -> None:
+        from mjlab.envs.mdp import dr as mjlab_dr
+
+        hv_config, mjlab_config = _make_mini3_mjlab_cfg()
+
+        self.assertTrue(hv_config.domain_rand.randomize_pd_gain)
+        self.assertEqual(list(hv_config.domain_rand.kp_range), [0.75, 1.25])
+        self.assertEqual(list(hv_config.domain_rand.kd_range), [0.75, 1.25])
+        event = mjlab_config.events["random_pd_gains"]
+        self.assertEqual(event.mode, "reset")
+        self.assertIs(event.func, mjlab_dr.pd_gains)
+        self.assertEqual(event.params["kp_range"], (0.75, 1.25))
+        self.assertEqual(event.params["kd_range"], (0.75, 1.25))
+        self.assertEqual(event.params["operation"], "scale")
+
+        self.assertTrue(hv_config.domain_rand.randomize_ctrl_delay)
+        self.assertEqual(list(hv_config.domain_rand.ctrl_delay_step_range), [0, 1])
+        self.assertTrue(hv_config.domain_rand.randomize_motor_strength)
+        motor_event = mjlab_config.events["random_motor_strength"]
+        self.assertEqual(motor_event.mode, "reset")
+        self.assertIs(motor_event.func, _randomize_dc_motor_strength)
+        self.assertEqual(motor_event.params["strength_range"], (0.9, 1.1))
+
+    def test_disable_dr_removes_mini3_pd_gain_event(self) -> None:
+        hv_config, mjlab_config = _make_mini3_mjlab_cfg(disable_domain_randomization=True)
+
+        self.assertFalse(hv_config.domain_rand.randomize_pd_gain)
+        self.assertNotIn("random_pd_gains", mjlab_config.events)
+        self.assertFalse(hv_config.domain_rand.randomize_ctrl_delay)
+        self.assertFalse(hv_config.domain_rand.randomize_motor_strength)
+        self.assertNotIn("random_motor_strength", mjlab_config.events)
+
+    def test_mini3_fb_aux_reward_overrides_reach_agent_config(self) -> None:
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_unit",
+            num_envs=1,
+            num_env_steps=1,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            agent="fb",
+            robot_config="configs/robots/mini3.yaml",
+        )
+
+        self.assertEqual(cfg.agent.aux_rewards_scaling["penalty_action_rate"], -0.2)
+        self.assertEqual(cfg.agent.aux_rewards_scaling["penalty_ankle_roll"], -1.0)
 
     def test_manifest_robot_config_is_used_when_cli_missing(self) -> None:
         argv = [
@@ -218,10 +307,9 @@ class RobotConfigTrainingTest(unittest.TestCase):
         ):
             core._validate_aux_reward_semantics(cfg)
 
-
     def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)
-        core.actions = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
+        core.applied_actions = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
         core.default_dof_pos_offset = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
         core.action_target_scale = torch.tensor([[1.0, 2.0, 1.0, 4.0]])
         core._action_term_dof_indices = torch.tensor([2, 0, 3, 1])
@@ -229,6 +317,23 @@ class RobotConfigTrainingTest(unittest.TestCase):
         action_input = core._mjlab_action_input()
 
         torch.testing.assert_close(action_input, torch.tensor([[33.0, 11.0, 41.0, 21.0]]))
+
+    def test_control_delay_applies_per_environment_action_history(self) -> None:
+        core = object.__new__(HumanoidVerseMjlabCore)
+        core.config = OmegaConf.create({"domain_rand": {"randomize_ctrl_delay": True, "ctrl_delay_step_range": [0, 1]}})
+        core.num_envs = 2
+        core.num_dof = 2
+        core.device = "cpu"
+        core.actions = torch.zeros(2, 2)
+        core.applied_actions = torch.zeros_like(core.actions)
+        core._init_control_delay()
+        core.ctrl_delay_steps[:] = torch.tensor([0, 1])
+
+        first = core._apply_control_delay(torch.tensor([[1.0, 2.0], [3.0, 4.0]])).clone()
+        second = core._apply_control_delay(torch.tensor([[5.0, 6.0], [7.0, 8.0]])).clone()
+
+        torch.testing.assert_close(first, torch.tensor([[1.0, 2.0], [0.0, 0.0]]))
+        torch.testing.assert_close(second, torch.tensor([[5.0, 6.0], [3.0, 4.0]]))
 
     def test_yaml_actuator_missing_joint_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,12 +53,30 @@ def _required_name_list(config: dict[str, Any], key: str, *, context: str) -> li
     return [str(item) for item in value]
 
 
+def _optional_float_mapping(config: dict[str, Any], key: str, *, context: str) -> dict[str, float]:
+    value = config.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"{context}.{key} must be a mapping")
+    result = {}
+    for raw_name, raw_value in value.items():
+        name = str(raw_name)
+        try:
+            number = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{context}.{key}.{name} must be numeric, got {raw_value!r}") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"{context}.{key}.{name} must be finite, got {raw_value!r}")
+        result[name] = number
+    return result
+
+
 @dataclass(frozen=True)
 class RobotTrainingSpec:
     config_path: Path
     robot: RobotSpec
     hydra_robot: str
     hydra_overrides: list[str]
+    fb_aux_rewards_scaling: dict[str, float]
     action_scale: float
     action_clip_value: float
     normalize_action_to: float
@@ -136,6 +155,17 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
     control = _required_mapping(training, "control", context="training")
     init_state = _required_mapping(training, "init_state", context="training")
     actuator = _required_mapping(training, "actuator", context="training")
+    agent = training.get("agent") or {}
+    if not isinstance(agent, dict):
+        raise ValueError("training.agent must be a mapping")
+    fb_agent = agent.get("fb") or {}
+    if not isinstance(fb_agent, dict):
+        raise ValueError("training.agent.fb must be a mapping")
+    fb_aux_rewards_scaling = _optional_float_mapping(
+        fb_agent,
+        "aux_rewards_scaling",
+        context="training.agent.fb",
+    )
 
     control_joints = list(robot.control_joint_names)
     joint_count = len(control_joints)
@@ -178,6 +208,7 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
         robot=robot,
         hydra_robot=str(training["hydra_robot"]),
         hydra_overrides=[str(item) for item in training.get("hydra_overrides", [])],
+        fb_aux_rewards_scaling=fb_aux_rewards_scaling,
         action_scale=_required_float(control, "action_scale", context="training.control"),
         action_clip_value=_required_float(control, "action_clip_value", context="training.control"),
         normalize_action_to=_required_float(control, "normalize_action_to", context="training.control"),

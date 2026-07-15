@@ -25,6 +25,23 @@ For a new robot, provide:
 - `training.hydra_robot`, `training.init_state`, `training.control`, and
   `training.actuator` fields in the Robot YAML.
 
+FB auxiliary reward weights can be overridden per robot without editing the
+shared preset:
+
+```yaml
+training:
+  agent:
+    fb:
+      aux_rewards_scaling:
+        penalty_action_rate: -0.2
+        penalty_ankle_roll: -1.0
+```
+
+The mapping is a partial override of the defaults in
+`humanoidverse/agents/presets/fb.py`. Unknown reward names and non-finite values
+are rejected. The explicit `--cartwheel-aux-safe` mode takes precedence over
+these robot-specific values.
+
 ## XML-derived Draft Generation
 
 `robot_inspect` can generate a draft RobotTrainingSpec YAML and a matching

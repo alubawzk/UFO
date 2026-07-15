@@ -156,6 +156,7 @@ def build_ufo_mjlab_config(
         clip_grad_norm=clip_grad_norm,
         cartwheel_aux_safe=cartwheel_aux_safe,
         wandb_project=DEFAULT_WANDB_PROJECT,
+        fb_aux_rewards_scaling=robot_training.fb_aux_rewards_scaling,
     )
     agent_cfg = selected["agent_cfg"]
     wandb_group = selected["wandb_group"]
@@ -330,7 +331,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
-        f"compile={cfg.agent.compile}",
+        f"compile={cfg.agent.compile}, "
+        f"aux_rewards_scaling={dict(cfg.agent.aux_rewards_scaling) if hasattr(cfg.agent, 'aux_rewards_scaling') else {}}",
         flush=True,
     )
     try:

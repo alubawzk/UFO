@@ -9,7 +9,6 @@ from unittest.mock import patch
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.train import _default_update_z_every_step, build_ufo_mjlab_config, canonical_agent_name, parse_args
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -54,6 +53,40 @@ class AgentAliasesTest(unittest.TestCase):
         self.assertEqual(selected["wandb_group"], "ufo_tech")
         self.assertEqual(selected["agent_cfg"].name, "TldrDistAuxAgent")
         self.assertEqual(selected["agent_cfg"].train.update_z_every_step, 10)
+
+    def test_fb_preset_accepts_robot_aux_reward_overrides(self) -> None:
+        selected = build_agent_preset(
+            agent="fb",
+            device="cpu",
+            compile=False,
+            update_z_every_step=100,
+            lr_scale=1.0,
+            clip_grad_norm=0.0,
+            cartwheel_aux_safe=False,
+            wandb_project="test",
+            fb_aux_rewards_scaling={"penalty_action_rate": -0.2, "penalty_ankle_roll": -1.0},
+        )
+
+        scaling = selected["agent_cfg"].aux_rewards_scaling
+        self.assertEqual(scaling["penalty_action_rate"], -0.2)
+        self.assertEqual(scaling["penalty_ankle_roll"], -1.0)
+
+    def test_cartwheel_safe_takes_precedence_over_robot_aux_reward_overrides(self) -> None:
+        selected = build_agent_preset(
+            agent="fb",
+            device="cpu",
+            compile=False,
+            update_z_every_step=100,
+            lr_scale=1.0,
+            clip_grad_norm=0.0,
+            cartwheel_aux_safe=True,
+            wandb_project="test",
+            fb_aux_rewards_scaling={"penalty_action_rate": -0.2, "penalty_ankle_roll": -1.0},
+        )
+
+        agent = selected["agent_cfg"]
+        self.assertEqual(agent.aux_rewards_scaling["penalty_action_rate"], -0.03)
+        self.assertNotIn("penalty_ankle_roll", agent.aux_rewards)
 
     def test_tech_build_config_uses_canonical_public_names(self) -> None:
         cfg = build_ufo_mjlab_config(

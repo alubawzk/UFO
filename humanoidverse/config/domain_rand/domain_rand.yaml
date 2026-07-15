@@ -19,10 +19,14 @@ domain_rand:
   randomize_link_mass : True
   link_mass_range : [0.95, 1.05]
 
-  # pd gain
+  # Per-episode multiplicative PD gain scales, sampled independently per env/joint.
   randomize_pd_gain : False
   kp_range : [0.75, 1.25]
   kd_range : [0.75, 1.25]
+
+  # Per-episode scale for DC motor continuous and peak torque capacity.
+  randomize_motor_strength : False
+  motor_strength_range : [0.9, 1.1]
 
   # friction
   randomize_friction : True
@@ -38,9 +42,9 @@ domain_rand:
   rfi_lim_range : [0.5, 1.5]
 
 
-  # control delay
+  # Per-episode action delay in control steps.
   randomize_ctrl_delay : False
-  ctrl_delay_step_range : [0, 1] # integer max real delay is 90ms
+  ctrl_delay_step_range : [0, 1]
 
   # Mimicing BeyondMimic: https://github.com/HybridRobotics/whole_body_tracking/blob/dcecabd8c24c68f59d143fdf8e3a670f420c972d/source/whole_body_tracking/whole_body_tracking/tasks/tracking/tracking_env_cfg.py#L170
   randomize_default_dof_pos : True

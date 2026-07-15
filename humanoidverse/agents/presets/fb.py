@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
+
 from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig, FBcprAuxAgentTrainConfig
 from humanoidverse.agents.fb_cpr_aux.model import FBcprAuxModelArchiConfig, FBcprAuxModelConfig
 from humanoidverse.agents.nn_filters import DictInputFilterConfig
@@ -14,7 +17,6 @@ from humanoidverse.agents.nn_models import (
 )
 from humanoidverse.agents.normalizers import BatchNormNormalizerConfig, ObsNormalizerConfig
 
-
 TRAIN_RUNTIME = {
     "log_every_updates": 384000,
     "update_agent_every": 1024,
@@ -26,6 +28,19 @@ TRAIN_RUNTIME = {
     "eval_every_steps": 3200000,
 }
 
+SUPPORTED_AUX_REWARDS = {
+    "feet_heading_alignment",
+    "limits_dof_pos",
+    "limits_dof_vel",
+    "limits_torque",
+    "penalty_action_rate",
+    "penalty_ankle_roll",
+    "penalty_feet_ori",
+    "penalty_slippage",
+    "penalty_torques",
+    "penalty_undesired_contact",
+}
+
 
 def build_fb_agent(
     device: str = "cuda",
@@ -34,6 +49,7 @@ def build_fb_agent(
     lr_scale: float = 1.0,
     clip_grad_norm: float = 0.0,
     cartwheel_aux_safe: bool = False,
+    aux_rewards_scaling_overrides: Mapping[str, float] | None = None,
 ) -> FBcprAuxAgentConfig:
     if cartwheel_aux_safe:
         aux_rewards = [
@@ -69,6 +85,20 @@ def build_fb_agent(
             "penalty_torques": 0.0,
             "limits_torque": 0.0,
         }
+
+    overrides = dict(aux_rewards_scaling_overrides or {})
+    unknown = sorted(set(overrides) - SUPPORTED_AUX_REWARDS)
+    if unknown:
+        raise ValueError(f"Unsupported FB auxiliary rewards in robot config: {unknown}")
+    if cartwheel_aux_safe:
+        overrides = {}
+    for name, raw_scale in overrides.items():
+        scale = float(raw_scale)
+        if not math.isfinite(scale):
+            raise ValueError(f"FB auxiliary reward scale must be finite: {name}={raw_scale!r}")
+        if name not in aux_rewards:
+            aux_rewards.append(name)
+        aux_rewards_scaling[name] = scale
 
     return FBcprAuxAgentConfig(
         name="FBcprAuxAgent",

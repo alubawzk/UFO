@@ -11,11 +11,10 @@ import os
 import random
 import typing as tp
 from pathlib import Path
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Union
 
 import gymnasium
 import hydra
-import humanoidverse
 import numpy as np
 import pydantic
 import torch
@@ -24,19 +23,19 @@ from gymnasium.vector import VectorEnv
 from omegaconf import OmegaConf
 from torch.utils._pytree import tree_map
 
+import humanoidverse
 from humanoidverse.agents.base import BaseConfig
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.utils.helpers import pre_process_config
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
 from humanoidverse.utils.torch_utils import (
-    calc_heading_quat_inv,
     my_quat_rotate,
     quat_from_angle_axis,
     quat_mul,
     quat_rotate_inverse,
-    wxyz_to_xyzw,
     wrap_to_pi,
+    wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
 
@@ -137,6 +136,79 @@ def _to_list(value) -> list:
     if value is None:
         return []
     return list(OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value)
+
+
+def _positive_scale_range(value, name: str) -> tuple[float, float]:
+    values = [float(item) for item in _to_list(value)]
+    if len(values) != 2:
+        raise ValueError(f"{name} must contain exactly two values, got {values}")
+    lower, upper = values
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        raise ValueError(f"{name} values must be finite, got {values}")
+    if lower <= 0.0 or upper <= 0.0:
+        raise ValueError(f"{name} values must be positive multiplicative scales, got {values}")
+    if lower > upper:
+        raise ValueError(f"{name} lower bound must not exceed its upper bound, got {values}")
+    return lower, upper
+
+
+def _nonnegative_int_range(value, name: str) -> tuple[int, int]:
+    values = _to_list(value)
+    if len(values) != 2:
+        raise ValueError(f"{name} must contain exactly two values, got {values}")
+    parsed = []
+    for item in values:
+        try:
+            number = float(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} values must be integers, got {values}") from exc
+        if not np.isfinite(number) or not number.is_integer():
+            raise ValueError(f"{name} values must be finite integers, got {values}")
+        parsed.append(int(number))
+    lower, upper = parsed
+    if lower < 0 or upper < 0:
+        raise ValueError(f"{name} values must be nonnegative, got {values}")
+    if lower > upper:
+        raise ValueError(f"{name} lower bound must not exceed its upper bound, got {values}")
+    return lower, upper
+
+
+def _randomize_dc_motor_strength(env, env_ids, strength_range: tuple[float, float], asset_cfg) -> None:
+    """Scale DC motor continuous and peak torque from their nominal values."""
+    from mjlab.actuator import DcMotorActuator
+
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.long)
+
+    actuator_ids = asset_cfg.actuator_ids
+    if isinstance(actuator_ids, list):
+        actuators = [asset.actuators[index] for index in actuator_ids]
+    elif isinstance(actuator_ids, slice):
+        actuators = asset.actuators[actuator_ids]
+    else:
+        actuators = [asset.actuators[actuator_ids]]
+
+    for actuator in actuators:
+        if not isinstance(actuator, DcMotorActuator):
+            raise TypeError(f"Motor strength randomization requires DcMotorActuator, got {type(actuator).__name__}")
+        assert actuator.default_force_limit is not None
+        assert actuator.force_limit is not None
+        assert actuator.saturation_effort is not None
+        assert actuator.velocity_limit_motor is not None
+        assert actuator._vel_at_effort_lim is not None
+
+        sample_shape = actuator.default_force_limit[env_ids].shape
+        scales = torch.empty(sample_shape, device=env.device).uniform_(*strength_range)
+        force_limit = actuator.default_force_limit[env_ids] * scales
+        saturation_effort = torch.full_like(scales, float(actuator.cfg.saturation_effort)) * scales
+        actuator.set_effort_limit(env_ids, force_limit)
+        actuator.saturation_effort[env_ids] = saturation_effort
+        actuator._vel_at_effort_lim[env_ids] = actuator.velocity_limit_motor[env_ids] * (
+            1.0 + force_limit / saturation_effort
+        )
 
 
 def _to_float_dict(value) -> dict[str, float]:
@@ -331,6 +403,7 @@ def _compose_humanoidverse_config(
     if disable_domain_randomization:
         cfg.domain_rand.randomize_ctrl_delay = False
         cfg.domain_rand.randomize_pd_gain = False
+        cfg.domain_rand.randomize_motor_strength = False
         cfg.domain_rand.randomize_base_com = False
         cfg.domain_rand.randomize_link_mass = False
         cfg.domain_rand.randomize_friction = False
@@ -525,6 +598,29 @@ def make_mjlab_ufo_env_cfg(
             interval_range_s=tuple(float(x) for x in _to_list(domain_rand.push_interval_s)),
             params={"velocity_range": velocity_range},
         )
+    if bool(domain_rand.get("randomize_pd_gain", False)):
+        events["random_pd_gains"] = EventTermCfg(
+            mode="reset",
+            func=mjlab_dr.pd_gains,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "kp_range": _positive_scale_range(domain_rand.kp_range, "domain_rand.kp_range"),
+                "kd_range": _positive_scale_range(domain_rand.kd_range, "domain_rand.kd_range"),
+                "operation": "scale",
+            },
+        )
+    if bool(domain_rand.get("randomize_motor_strength", False)):
+        events["random_motor_strength"] = EventTermCfg(
+            mode="reset",
+            func=_randomize_dc_motor_strength,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "strength_range": _positive_scale_range(
+                    domain_rand.motor_strength_range,
+                    "domain_rand.motor_strength_range",
+                ),
+            },
+        )
     if bool(domain_rand.get("randomize_base_com", False)):
         base_com_range = domain_rand.base_com_range
         events["random_base_com"] = EventTermCfg(
@@ -681,6 +777,8 @@ class HumanoidVerseMjlabCore:
 
         self.actions = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
+        self.applied_actions = torch.zeros_like(self.actions)
+        self._init_control_delay()
         self.torques = torch.zeros_like(self.actions)
         self.last_dof_vel = torch.zeros_like(self.actions)
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -1020,9 +1118,49 @@ class HumanoidVerseMjlabCore:
             actions = actions * float(self.config.robot.control.normalize_action_to) / float(self.config.robot.control.normalize_action_from)
         return torch.clamp(actions, -float(self.config.robot.control.action_clip_value), float(self.config.robot.control.action_clip_value))
 
+    def _init_control_delay(self) -> None:
+        self.randomize_ctrl_delay = bool(self.config.domain_rand.get("randomize_ctrl_delay", False))
+        configured_range = _nonnegative_int_range(
+            self.config.domain_rand.get("ctrl_delay_step_range", [0, 0]),
+            "domain_rand.ctrl_delay_step_range",
+        )
+        self.ctrl_delay_step_range = configured_range if self.randomize_ctrl_delay else (0, 0)
+        self.ctrl_delay_steps = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+        self._action_history = torch.zeros(
+            self.num_envs,
+            self.ctrl_delay_step_range[1] + 1,
+            self.num_dof,
+            device=self.device,
+        )
+        self._action_history_cursor = 0
+        self._control_delay_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+
+    def _reset_control_delay(self, env_ids: torch.Tensor) -> None:
+        lower, upper = self.ctrl_delay_step_range
+        if self.randomize_ctrl_delay and lower < upper:
+            self.ctrl_delay_steps[env_ids] = torch.randint(
+                lower,
+                upper + 1,
+                (len(env_ids),),
+                device=self.device,
+                dtype=torch.long,
+            )
+        else:
+            self.ctrl_delay_steps[env_ids] = lower
+        self._action_history[env_ids] = 0.0
+        self.applied_actions[env_ids] = 0.0
+
+    def _apply_control_delay(self, actions: torch.Tensor) -> torch.Tensor:
+        history_length = self._action_history.shape[1]
+        self._action_history_cursor = (self._action_history_cursor + 1) % history_length
+        self._action_history[:, self._action_history_cursor] = actions
+        history_indices = torch.remainder(self._action_history_cursor - self.ctrl_delay_steps, history_length)
+        self.applied_actions.copy_(self._action_history[self._control_delay_env_ids, history_indices])
+        return self.applied_actions
+
     def _mjlab_action_input(self) -> torch.Tensor:
         action_indices = self._action_term_dof_indices
-        return self.actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
+        return self.applied_actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
             self.action_target_scale[:, action_indices], min=1.0e-6
         )
 
@@ -1031,6 +1169,7 @@ class HumanoidVerseMjlabCore:
         self.last_actions[:] = self.actions
         self.last_dof_vel[:] = self.dof_vel
         self.actions[:] = self._normalized_action(actions)
+        self._apply_control_delay(self.actions)
         mjlab_actions = self._mjlab_action_input()
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
         self._refresh_state()
@@ -1124,6 +1263,7 @@ class HumanoidVerseMjlabCore:
         self.mjlab_env._manual_reset_pending[env_ids] = False
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
+        self._reset_control_delay(env_ids)
         self.history_handler.reset(env_ids)
         self._refresh_state()
         self.simulator.refresh()

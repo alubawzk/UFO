@@ -50,8 +50,33 @@ default_dof_pos: {}
 
 training:
   hydra_robot: mini3/mini3_auto
-  hydra_overrides: []
+  hydra_overrides:
+    # Environment reward
+    - "rewards.reward_scales.penalty_action_rate=-0.2"
+    - "rewards.reward_scales.penalty_ankle_roll=-1.0"
+    - "rewards.reward_penalty_curriculum=false"
 
+    # Domain randomization
+    - "domain_rand.push_robots=true"
+    - "domain_rand.randomize_base_com=true"
+    - "domain_rand.base_com_range.x=[-0.03,0.03]"
+    - "domain_rand.base_com_range.y=[-0.03,0.03]"
+    - "domain_rand.link_mass_range=[0.98,1.02]"
+    - "domain_rand.friction_range=[0.5,2.2]"
+    - "domain_rand.randomize_pd_gain=true"
+    - "domain_rand.kp_range=[0.75,1.25]"
+    - "domain_rand.kd_range=[0.75,1.25]"
+    - "domain_rand.randomize_ctrl_delay=true"
+    - "domain_rand.ctrl_delay_step_range=[3,6]"
+    - "domain_rand.randomize_motor_strength=true"
+    - "domain_rand.motor_strength_range=[0.9,1.1]"
+  agent:
+    fb:
+      # These scales override the FB auxiliary critic preset, not only the
+      # environment reward used for rollout logging.
+      aux_rewards_scaling:
+        penalty_action_rate: -0.2
+        penalty_ankle_roll: -1.0
   semantics:
     # The auxiliary biped rewards assume exactly left/right contact bodies.
     contact_bodies:

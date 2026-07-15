@@ -97,6 +97,15 @@ UV_NO_SYNC=1 ./run_train.sh \
   --buffer-size 4096 \
   --work-dir /tmp/ufo_smoke_g1
 
+UV_NO_SYNC=1 ./run_train.sh \
+    --agent fb \
+    --robot-config configs/robots/mini3.yaml \
+    --data-manifest configs/data/mini3_pkl.yaml \
+    --gpu-ids single \
+    --smoke \
+    --buffer-size 4096 \
+    --work-dir runs/ufo_fb_mini3_smoke
+
 # 4090
 ./run_train.sh \
   --agent fb \
@@ -308,6 +317,7 @@ UFO 支持基于 manifest 的多数据源混合。每个数据源之间的采样
 
 - [Import Wizard](docs/import_wizard.md)：RobotState schema、数据检查和数据构建。
 - [Robot-Config Training](docs/robot_config_training.md)：实验性的 robot-aware training 初始化说明。
+- [Mini3 训练与配置调优](docs/mini3_training_configuration.md)：Mini3 训练准备、reward、域随机化和 smoke/正式训练流程。
 - [Training and Inference](docs/TRAIN_INFERENCE.md)：更多训练和推理命令。
 - [Deploy branch](https://github.com/Roboparty/UFO/tree/deploy)：G1 实机部署和遥操作运行时。
 

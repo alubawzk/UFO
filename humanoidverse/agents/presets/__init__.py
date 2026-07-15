@@ -21,6 +21,7 @@ def build_agent_preset(
     clip_grad_norm: float,
     cartwheel_aux_safe: bool,
     wandb_project: str,
+    fb_aux_rewards_scaling: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     if agent == "fb":
         return {
@@ -31,6 +32,7 @@ def build_agent_preset(
                 lr_scale=lr_scale,
                 clip_grad_norm=clip_grad_norm,
                 cartwheel_aux_safe=cartwheel_aux_safe,
+                aux_rewards_scaling_overrides=fb_aux_rewards_scaling,
             ),
             "wandb_group": "ufo_fb",
             "wandb_project": wandb_project,
