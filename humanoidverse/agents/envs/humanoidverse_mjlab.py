@@ -1230,6 +1230,7 @@ class HumanoidVerseMjlabCore:
             motion_times = self.motion_start_times[env_ids]
             motion_res = self._motion_lib.get_motion_state(self.motion_ids[env_ids], motion_times, offset=self.env_origins[env_ids])
             root_pos = motion_res["root_pos"]
+            root_pos[:, 2] += 0.01
             root_rot = motion_res["root_rot"]
             root_vel = motion_res["root_vel"]
             root_ang_vel = motion_res["root_ang_vel"]

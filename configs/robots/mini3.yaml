@@ -99,7 +99,7 @@ training:
       - right_ankle_roll_joint
 
   init_state:
-    pos: [0.0, 0.0, 0.46305]
+    pos: [0.0, 0.0, 0.47]
     rot: [0.0, 0.0, 0.0, 1.0]
     lin_vel: [0.0, 0.0, 0.0]
     ang_vel: [0.0, 0.0, 0.0]
