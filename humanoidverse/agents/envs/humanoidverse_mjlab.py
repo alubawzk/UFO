@@ -7,6 +7,7 @@ MJLab owns batched physics stepping; this wrapper reconstructs the observation,
 reward, reset and info dictionaries expected by the original UFO code.
 """
 
+import math
 import os
 import random
 import typing as tp
@@ -48,6 +49,159 @@ HYDRA_CONFIG_DIR = os.path.join(HUMANOIDVERSE_DIR, "config")
 HYDRA_CONFIG_REL_PATH = os.path.join("exp", "bfm_zero", "bfm_zero")
 G1_MJLAB_MJCF_PATH = "humanoidverse/data/robots/g1_mjlab/g1_29dof.xml"
 G1_MJLAB_ACTUATOR_SOURCE = "g1-mode_15"
+
+
+class _SimulationStepActionDelay:
+    """Delay zero-order-held policy actions in physics simulation steps."""
+
+    def __init__(
+        self,
+        *,
+        num_envs: int,
+        step_ranges: tuple[tuple[int, int], ...],
+        group_names: tuple[str, ...],
+        device: str | torch.device,
+    ) -> None:
+        if not step_ranges or len(step_ranges) != len(group_names):
+            raise ValueError("step_ranges and group_names must have the same non-zero length")
+        self.step_ranges = step_ranges
+        self.group_names = group_names
+        action_dim = len(step_ranges)
+        max_delay = max(step_range[1] for step_range in step_ranges)
+        self.delay_steps = torch.zeros(num_envs, action_dim, device=device, dtype=torch.long)
+        self.applied_actions = torch.zeros(num_envs, action_dim, device=device)
+        self._history = torch.zeros(num_envs, max_delay + 1, action_dim, device=device)
+        self._cursor = 0
+        self._env_ids = torch.arange(num_envs, device=device, dtype=torch.long)
+        self._action_ids = torch.arange(action_dim, device=device, dtype=torch.long)
+        self._group_action_ids: dict[str, torch.Tensor] = {}
+        for group_name in dict.fromkeys(group_names):
+            action_ids = [index for index, name in enumerate(group_names) if name == group_name]
+            ranges = {step_ranges[index] for index in action_ids}
+            if len(ranges) != 1:
+                raise ValueError(f"Delay group {group_name!r} must use one shared step range, got {sorted(ranges)}")
+            self._group_action_ids[group_name] = torch.tensor(action_ids, device=device, dtype=torch.long)
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        selected_env_ids = self._env_ids[env_ids]
+        for group_name, action_ids in self._group_action_ids.items():
+            lower, upper = self.step_ranges[int(action_ids[0])]
+            if lower < upper:
+                sampled_steps = torch.randint(
+                    lower,
+                    upper + 1,
+                    (selected_env_ids.numel(),),
+                    device=self.delay_steps.device,
+                    dtype=torch.long,
+                )
+            else:
+                sampled_steps = torch.full_like(selected_env_ids, lower)
+            self.delay_steps[selected_env_ids[:, None], action_ids[None, :]] = sampled_steps[:, None]
+        self._history[selected_env_ids] = 0.0
+        self.applied_actions[selected_env_ids] = 0.0
+
+    def push(self, actions: torch.Tensor) -> torch.Tensor:
+        """Advance the FIFO by exactly one physics simulation step."""
+        self._cursor = (self._cursor + 1) % self._history.shape[1]
+        self._history[:, self._cursor] = actions
+        history_indices = torch.remainder(self._cursor - self.delay_steps, self._history.shape[1])
+        delayed_actions = self._history[self._env_ids[:, None], history_indices, self._action_ids[None, :]]
+        self.applied_actions.copy_(delayed_actions)
+        return self.applied_actions
+
+
+class _SimulationStepImuDelay:
+    """Delay a six-axis IMU frame using a physics-step ring buffer."""
+
+    def __init__(
+        self,
+        *,
+        num_envs: int,
+        physics_dt: float,
+        time_range_s: tuple[float, float],
+        interpolate: bool,
+        device: str | torch.device,
+    ) -> None:
+        delay_min_s, delay_max_s = time_range_s
+        if physics_dt <= 0.0:
+            raise ValueError(f"physics_dt must be positive, got {physics_dt}")
+        if delay_min_s < 0.0 or delay_max_s < delay_min_s:
+            raise ValueError(f"Invalid IMU delay range: {time_range_s}")
+        self.physics_dt = float(physics_dt)
+        self.time_range_s = (float(delay_min_s), float(delay_max_s))
+        self.interpolate = bool(interpolate)
+        self.delay_seconds = torch.zeros(num_envs, device=device)
+        self._capacity = math.ceil(delay_max_s / physics_dt) + 2
+        self._history = torch.zeros(self._capacity, num_envs, 6, device=device)
+        self._write_idx = 0
+        self._env_ids = torch.arange(num_envs, device=device, dtype=torch.long)
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    def reset(
+        self,
+        env_ids: torch.Tensor | slice | None,
+        current_imu: torch.Tensor,
+        *,
+        resample: bool,
+    ) -> None:
+        if env_ids is None:
+            env_ids = slice(None)
+        selected_env_ids = self._env_ids[env_ids]
+        if selected_env_ids.numel() == 0:
+            return
+        if current_imu.shape != (self._env_ids.numel(), 6):
+            raise ValueError(f"current_imu must have shape {(self._env_ids.numel(), 6)}, got {tuple(current_imu.shape)}")
+        if resample:
+            delay_min_s, delay_max_s = self.time_range_s
+            if delay_min_s < delay_max_s:
+                self.delay_seconds[selected_env_ids] = delay_min_s + torch.rand(
+                    selected_env_ids.numel(), device=self.delay_seconds.device
+                ) * (delay_max_s - delay_min_s)
+            else:
+                self.delay_seconds[selected_env_ids] = delay_min_s
+        selected_imu = current_imu[selected_env_ids]
+        self._history[:, selected_env_ids, :] = selected_imu.unsqueeze(0)
+
+    def record(self, current_imu: torch.Tensor) -> None:
+        if current_imu.shape != (self._env_ids.numel(), 6):
+            raise ValueError(f"current_imu must have shape {(self._env_ids.numel(), 6)}, got {tuple(current_imu.shape)}")
+        self._history[self._write_idx].copy_(current_imu)
+        self._write_idx = (self._write_idx + 1) % self._capacity
+
+    def read(self) -> torch.Tensor:
+        delay_steps_f = self.delay_seconds / self.physics_dt
+        if not self.interpolate:
+            return self._read_steps(torch.round(delay_steps_f).to(dtype=torch.long))
+        delay_floor = torch.floor(delay_steps_f).to(dtype=torch.long)
+        alpha = (delay_steps_f - delay_floor.float()).unsqueeze(-1)
+        newer = self._read_steps(delay_floor)
+        older = self._read_steps(delay_floor + 1)
+        return (1.0 - alpha) * newer + alpha * older
+
+    def _read_steps(self, delay_steps: torch.Tensor) -> torch.Tensor:
+        delay_steps = torch.clamp(delay_steps, 0, self._capacity - 1)
+        history_idx = torch.remainder(self._write_idx - 1 - delay_steps, self._capacity)
+        return self._history[history_idx, self._env_ids]
+
+
+class _MetricsManagerWithImuRecorder:
+    """Add an IMU callback to MJLab's existing post-physics substep hook."""
+
+    def __init__(self, metrics_manager: Any, record_imu: tp.Callable[[], None]) -> None:
+        self._metrics_manager = metrics_manager
+        self._record_imu = record_imu
+
+    def compute_substep(self) -> None:
+        self._record_imu()
+        self._metrics_manager.compute_substep()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._metrics_manager, name)
 
 
 def _resolve_humanoidverse_path(path_value: str | os.PathLike[str]) -> str:
@@ -219,9 +373,7 @@ def _randomize_dc_motor_strength(env, env_ids, strength_range: tuple[float, floa
         saturation_effort = torch.full_like(scales, float(actuator.cfg.saturation_effort)) * scales
         actuator.set_effort_limit(env_ids, force_limit)
         actuator.saturation_effort[env_ids] = saturation_effort
-        actuator._vel_at_effort_lim[env_ids] = actuator.velocity_limit_motor[env_ids] * (
-            1.0 + force_limit / saturation_effort
-        )
+        actuator._vel_at_effort_lim[env_ids] = actuator.velocity_limit_motor[env_ids] * (1.0 + force_limit / saturation_effort)
 
 
 def _to_float_dict(value) -> dict[str, float]:
@@ -352,6 +504,79 @@ def _actuator_params_from_training(
     return source, params
 
 
+def _actuator_delay_spec_from_training(
+    dof_names: tp.Sequence[str], robot_training: dict[str, Any] | None
+) -> tuple[tuple[tuple[int, int], ...], tuple[str, ...]] | None:
+    """Resolve per-joint physics-step delay ranges and shared sampling groups."""
+    if not robot_training:
+        return None
+    actuator = dict(robot_training.get("actuator") or {})
+    raw_groups = actuator.get("delay_groups")
+    if raw_groups is None:
+        return None
+    if not isinstance(raw_groups, dict) or not raw_groups:
+        raise ValueError("training.actuator.delay_groups must be a non-empty mapping")
+
+    dof_name_set = set(dof_names)
+    assigned: dict[str, tuple[tuple[int, int], str]] = {}
+    for raw_group_name, raw_group in raw_groups.items():
+        group_name = str(raw_group_name)
+        if not isinstance(raw_group, dict):
+            raise ValueError(f"training.actuator.delay_groups.{group_name} must be a mapping")
+        joint_names = raw_group.get("joint_names")
+        if not isinstance(joint_names, (list, tuple)) or not joint_names:
+            raise ValueError(f"training.actuator.delay_groups.{group_name}.joint_names must be a non-empty list")
+        step_range = _nonnegative_int_range(
+            [raw_group.get("min_delay"), raw_group.get("max_delay")],
+            f"training.actuator.delay_groups.{group_name}",
+        )
+        for raw_joint_name in joint_names:
+            joint_name = str(raw_joint_name)
+            if joint_name not in dof_name_set:
+                raise ValueError(f"training.actuator.delay_groups.{group_name} contains unknown joint {joint_name!r}")
+            if joint_name in assigned:
+                previous_group = assigned[joint_name][1]
+                raise ValueError(
+                    f"training.actuator.delay_groups assigns joint {joint_name!r} to both {previous_group!r} and {group_name!r}"
+                )
+            assigned[joint_name] = (step_range, group_name)
+
+    missing = [joint_name for joint_name in dof_names if joint_name not in assigned]
+    if missing:
+        raise ValueError(f"training.actuator.delay_groups is missing joints: {missing}")
+    return (
+        tuple(assigned[joint_name][0] for joint_name in dof_names),
+        tuple(assigned[joint_name][1] for joint_name in dof_names),
+    )
+
+
+def _imu_delay_spec_from_training(
+    robot_training: dict[str, Any] | None,
+) -> tuple[tuple[float, float], bool, bool] | None:
+    if not robot_training:
+        return None
+    raw_spec = robot_training.get("imu_delay")
+    if raw_spec is None:
+        return None
+    if not isinstance(raw_spec, dict):
+        raise ValueError("training.imu_delay must be a mapping")
+    if not bool(raw_spec.get("enabled", False)):
+        return None
+    time_range = [float(value) for value in _to_list(raw_spec.get("time_range_s"))]
+    if len(time_range) != 2:
+        raise ValueError(f"training.imu_delay.time_range_s must contain exactly two values, got {time_range}")
+    delay_min_s, delay_max_s = time_range
+    if not math.isfinite(delay_min_s) or not math.isfinite(delay_max_s):
+        raise ValueError(f"training.imu_delay.time_range_s must be finite, got {time_range}")
+    if delay_min_s < 0.0 or delay_max_s < delay_min_s:
+        raise ValueError(f"training.imu_delay.time_range_s must satisfy 0 <= min <= max, got {time_range}")
+    return (
+        (delay_min_s, delay_max_s),
+        bool(raw_spec.get("randomize_on_reset", True)),
+        bool(raw_spec.get("interpolate", True)),
+    )
+
+
 def _default_joint_pos(config) -> torch.Tensor:
     values = [float(config.robot.init_state.default_joint_angles[name]) for name in config.robot.dof_names]
     return torch.tensor(values, dtype=torch.float32)
@@ -462,6 +687,8 @@ def make_mjlab_ufo_env_cfg(
     robot_training: dict[str, Any] | None = None,
 ):
     """Create an MJLab ManagerBasedRlEnvCfg with UFO robot metadata."""
+    from dataclasses import dataclass
+
     import mujoco
     from mjlab.actuator import DcMotorActuatorCfg
     from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
@@ -469,7 +696,7 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.envs import mdp as mjlab_mdp
     from mjlab.envs.mdp import dr as mjlab_dr
     from mjlab.envs.mdp import terminations as mjlab_terminations
-    from mjlab.envs.mdp.actions import JointPositionActionCfg
+    from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
     from mjlab.managers.event_manager import EventTermCfg
     from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
     from mjlab.managers.reward_manager import RewardTermCfg
@@ -479,6 +706,50 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
     from mjlab.terrains import TerrainEntityCfg
+
+    class SimulationStepDelayedJointPositionAction(JointPositionAction):
+        """Joint-position action whose FIFO advances on every physics step."""
+
+        cfg: "SimulationStepDelayedJointPositionActionCfg"
+
+        def __init__(self, cfg, env) -> None:
+            super().__init__(cfg, env)
+            self.delay = _SimulationStepActionDelay(
+                num_envs=self.num_envs,
+                step_ranges=cfg.delay_step_ranges,
+                group_names=cfg.delay_group_names,
+                device=self.device,
+            )
+
+        @property
+        def applied_raw_action(self) -> torch.Tensor:
+            return self.delay.applied_actions
+
+        def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+            if env_ids is None:
+                env_ids = slice(None)
+            super().reset(env_ids=env_ids)
+            self._processed_actions[env_ids] = 0.0
+            self.delay.reset(env_ids)
+
+        def apply_actions(self) -> None:
+            delayed_raw_action = self.delay.push(self._raw_actions)
+            self._processed_actions = delayed_raw_action * self._scale + self._offset
+            if self.cfg.clip is not None:
+                self._processed_actions = torch.clamp(
+                    self._processed_actions,
+                    min=self._clip[:, :, 0],
+                    max=self._clip[:, :, 1],
+                )
+            super().apply_actions()
+
+    @dataclass(kw_only=True)
+    class SimulationStepDelayedJointPositionActionCfg(JointPositionActionCfg):
+        delay_step_ranges: tuple[tuple[int, int], ...] = ()
+        delay_group_names: tuple[str, ...] = ()
+
+        def build(self, env) -> SimulationStepDelayedJointPositionAction:
+            return SimulationStepDelayedJointPositionAction(self, env)
 
     dof_names = tuple(_to_list(config.robot.dof_names))
     body_names = tuple(_to_list(config.robot.body_names))
@@ -586,13 +857,39 @@ def make_mjlab_ufo_env_cfg(
             enable_corruption=False,
         )
     }
+    domain_rand = config.domain_rand
+    actuator_delay_spec = _actuator_delay_spec_from_training(dof_names, robot_training)
+    if actuator_delay_spec is None:
+        configured_delay_range = _nonnegative_int_range(
+            domain_rand.get("ctrl_delay_step_range", [0, 0]),
+            "domain_rand.ctrl_delay_step_range",
+        )
+        delay_step_ranges = tuple(configured_delay_range for _ in dof_names)
+        delay_group_names = tuple("all" for _ in dof_names)
+    else:
+        delay_step_ranges, delay_group_names = actuator_delay_spec
+    if not bool(domain_rand.get("randomize_ctrl_delay", False)):
+        delay_step_ranges = tuple((0, 0) for _ in dof_names)
+    delay_groups = dict.fromkeys(delay_group_names)
+    for group_name in delay_groups:
+        delay_groups[group_name] = delay_step_ranges[delay_group_names.index(group_name)]
+    physics_hz = float(config.simulator.config.sim.fps)
+    control_decimation = int(config.simulator.config.sim.control_decimation)
+    print(
+        "[INFO] MJLab control timing: "
+        f"physics_hz={physics_hz:g}, policy_hz={physics_hz / control_decimation:g}, "
+        f"control_decimation={control_decimation}, delay_unit=physics_step, delay_groups={delay_groups}",
+        flush=True,
+    )
     actions = {
-        "actions": JointPositionActionCfg(
+        "actions": SimulationStepDelayedJointPositionActionCfg(
             entity_name="robot",
             actuator_names=dof_names,
             preserve_order=True,
             scale=action_scale,
             use_default_offset=True,
+            delay_step_ranges=delay_step_ranges,
+            delay_group_names=delay_group_names,
         )
     }
     reward_keys = tuple(config.rewards.reward_scales.keys())
@@ -600,7 +897,6 @@ def make_mjlab_ufo_env_cfg(
     terminations = {
         "time_out": TerminationTermCfg(func=mjlab_terminations.time_out, time_out=True),
     }
-    domain_rand = config.domain_rand
     events = {}
     if bool(domain_rand.get("push_robots", False)):
         max_push_vel_xy = float(domain_rand.max_push_vel_xy)
@@ -768,6 +1064,9 @@ class HumanoidVerseMjlabCore:
         self._body_ids = torch.tensor([mjlab_body_names.index(name) for name in self.body_names], device=self.device, dtype=torch.long)
 
         action_term = self.mjlab_env.action_manager.get_term("actions")
+        if not hasattr(action_term, "delay") or not hasattr(action_term, "applied_raw_action"):
+            raise TypeError("MJLab UFO actions must use the simulation-step delayed joint-position action term")
+        self._action_term = action_term
         action_target_names = tuple(action_term.target_names)
         if len(action_target_names) != self.num_dof or set(action_target_names) != set(self.dof_names):
             raise ValueError(
@@ -779,8 +1078,7 @@ class HumanoidVerseMjlabCore:
         )
         if action_target_names != self.dof_names:
             print(
-                "[INFO] MJLab action target order differs from HumanoidVerse dof order: "
-                f"action_target_names={list(action_target_names)}",
+                f"[INFO] MJLab action target order differs from HumanoidVerse dof order: action_target_names={list(action_target_names)}",
                 flush=True,
             )
 
@@ -789,6 +1087,18 @@ class HumanoidVerseMjlabCore:
         self.action_target_scale = _action_target_scale(hv_config).to(self.device).unsqueeze(0)
         self.gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         self.forward_vec = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+        imu_delay_spec = _imu_delay_spec_from_training(creation_config.robot_training)
+        self._imu_delay: _SimulationStepImuDelay | None = None
+        self._imu_delay_randomize_on_reset = False
+        if imu_delay_spec is not None:
+            time_range_s, self._imu_delay_randomize_on_reset, interpolate = imu_delay_spec
+            self._imu_delay = _SimulationStepImuDelay(
+                num_envs=self.num_envs,
+                physics_dt=self.sim_dt,
+                time_range_s=time_range_s,
+                interpolate=interpolate,
+                device=self.device,
+            )
 
         lower = torch.tensor(_to_list(hv_config.robot.dof_pos_lower_limit_list), dtype=torch.float32, device=self.device)
         upper = torch.tensor(_to_list(hv_config.robot.dof_pos_upper_limit_list), dtype=torch.float32, device=self.device)
@@ -803,7 +1113,8 @@ class HumanoidVerseMjlabCore:
         self.actions = torch.zeros(self.num_envs, self.num_dof, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
         self.applied_actions = torch.zeros_like(self.actions)
-        self._init_control_delay()
+        self.ctrl_delay_step_ranges = tuple(action_term.delay.step_ranges)
+        self.ctrl_delay_steps = action_term.delay.delay_steps
         self.torques = torch.zeros_like(self.actions)
         self.last_dof_vel = torch.zeros_like(self.actions)
         self.episode_length_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -814,14 +1125,20 @@ class HumanoidVerseMjlabCore:
 
         self._init_reward_scales()
         self._validate_aux_reward_semantics(hv_config)
-        self.feet_indices = torch.tensor([self.body_names.index(name) for name in hv_config.robot.contact_bodies], device=self.device, dtype=torch.long)
+        self.feet_indices = torch.tensor(
+            [self.body_names.index(name) for name in hv_config.robot.contact_bodies], device=self.device, dtype=torch.long
+        )
         self.torso_index = self.body_names.index(hv_config.robot.torso_name)
         penalized = []
         for pattern in _to_list(hv_config.robot.penalize_contacts_on):
             penalized.extend([i for i, name in enumerate(self.body_names) if pattern in name])
         self.penalised_contact_indices = torch.tensor(sorted(set(penalized)), device=self.device, dtype=torch.long)
-        self.left_ankle_dof_indices = torch.tensor([self.dof_names.index(n) for n in hv_config.robot.left_ankle_dof_names], device=self.device)
-        self.right_ankle_dof_indices = torch.tensor([self.dof_names.index(n) for n in hv_config.robot.right_ankle_dof_names], device=self.device)
+        self.left_ankle_dof_indices = torch.tensor(
+            [self.dof_names.index(n) for n in hv_config.robot.left_ankle_dof_names], device=self.device
+        )
+        self.right_ankle_dof_indices = torch.tensor(
+            [self.dof_names.index(n) for n in hv_config.robot.right_ankle_dof_names], device=self.device
+        )
 
         self._init_motion_extend()
         self.is_evaluating = False
@@ -836,7 +1153,49 @@ class HumanoidVerseMjlabCore:
         self.simulator = _MjlabSimulatorView(self)
 
         self._refresh_state()
+        if self._imu_delay is not None:
+            all_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            self._imu_delay.reset(all_env_ids, self._current_simulation_imu_frame(), resample=True)
+            self.mjlab_env.metrics_manager = _MetricsManagerWithImuRecorder(
+                self.mjlab_env.metrics_manager,
+                self._record_imu_substep,
+            )
+            delay_min_s, delay_max_s = self._imu_delay.time_range_s
+            print(
+                "[INFO] MJLab IMU delay: "
+                f"enabled=True, physics_dt={self.sim_dt:g}s, time_range_s=({delay_min_s:g}, {delay_max_s:g}), "
+                f"step_range=({delay_min_s / self.sim_dt:g}, {delay_max_s / self.sim_dt:g}), "
+                f"capacity={self._imu_delay.capacity}, interpolate={self._imu_delay.interpolate}, "
+                f"randomize_on_reset={self._imu_delay_randomize_on_reset}",
+                flush=True,
+            )
         self.simulator.refresh()
+
+    def _current_simulation_imu_frame(self) -> torch.Tensor:
+        """Read current angular velocity and gravity directly from qpos/qvel."""
+        data = self.robot.data
+        root_quat_wxyz = data.data.qpos[:, data.indexing.free_joint_q_adr[3:7]]
+        root_ang_vel_b = data.data.qvel[:, data.indexing.free_joint_v_adr[3:6]]
+        projected_gravity = quat_rotate_inverse(wxyz_to_xyzw(root_quat_wxyz), self.gravity_vec, w_last=True)
+        return torch.cat([root_ang_vel_b, projected_gravity], dim=-1)
+
+    def _record_imu_substep(self) -> None:
+        if self._imu_delay is not None:
+            self._imu_delay.record(self._current_simulation_imu_frame())
+
+    def _policy_imu_frame(self) -> torch.Tensor:
+        if self._imu_delay is None:
+            return torch.cat([self.base_ang_vel, self.projected_gravity], dim=-1)
+        return self._imu_delay.read()
+
+    def _reset_imu_delay(self, env_ids: torch.Tensor) -> None:
+        if self._imu_delay is None:
+            return
+        self._imu_delay.reset(
+            env_ids,
+            self._current_simulation_imu_frame(),
+            resample=self._imu_delay_randomize_on_reset,
+        )
 
     def _init_reward_scales(self) -> None:
         self.reward_scales = dict(OmegaConf.to_container(self.config.rewards.reward_scales, resolve=True))
@@ -935,9 +1294,13 @@ class HumanoidVerseMjlabCore:
         if self.num_extend_bodies:
             self.extend_body_parent_ids = torch.tensor(extend_parent_ids, device=self.device, dtype=torch.long)
             self.extend_body_pos_in_parent = torch.tensor(extend_pos, device=self.device, dtype=torch.float32).repeat(self.num_envs, 1, 1)
-            self.extend_body_rot_in_parent_wxyz = torch.tensor(extend_rot, device=self.device, dtype=torch.float32).repeat(self.num_envs, 1, 1)
+            self.extend_body_rot_in_parent_wxyz = torch.tensor(extend_rot, device=self.device, dtype=torch.float32).repeat(
+                self.num_envs, 1, 1
+            )
             self.extend_body_rot_in_parent_xyzw = self.extend_body_rot_in_parent_wxyz[:, :, [1, 2, 3, 0]]
-            self.body_names = tuple(list(self.body_names) + [item["joint_name"] for item in _to_list(self.config.robot.motion.extend_config)])
+            self.body_names = tuple(
+                list(self.body_names) + [item["joint_name"] for item in _to_list(self.config.robot.motion.extend_config)]
+            )
         else:
             self.extend_body_parent_ids = torch.empty(0, device=self.device, dtype=torch.long)
         self.ref_body_pos_extend = torch.zeros(self.num_envs, self.num_bodies + self.num_extend_bodies, 3, device=self.device)
@@ -1049,12 +1412,13 @@ class HumanoidVerseMjlabCore:
     def _raw_actor_obs(self) -> dict[str, torch.Tensor]:
         self._compute_reference_and_privileged_obs()
         dof_pos_rel = self.dof_pos - (self.default_dof_pos + self.default_dof_pos_offset)
+        policy_imu = self._policy_imu_frame()
         obs_data = {
             "actions": self._apply_obs_scale_noise("actions", self.actions),
-            "base_ang_vel": self._apply_obs_scale_noise("base_ang_vel", self.base_ang_vel),
+            "base_ang_vel": self._apply_obs_scale_noise("base_ang_vel", policy_imu[:, :3]),
             "dof_pos": self._apply_obs_scale_noise("dof_pos", dof_pos_rel),
             "dof_vel": self._apply_obs_scale_noise("dof_vel", self.dof_vel),
-            "projected_gravity": self._apply_obs_scale_noise("projected_gravity", self.projected_gravity),
+            "projected_gravity": self._apply_obs_scale_noise("projected_gravity", policy_imu[:, 3:]),
             "max_local_self": self._apply_obs_scale_noise("max_local_self", self._max_local_self),
         }
         history_config = self.config.obs.obs_auxiliary["history_actor"]
@@ -1124,9 +1488,9 @@ class HumanoidVerseMjlabCore:
         forward_right = my_quat_rotate(right_quat, self.forward_vec)
         root_forward = my_quat_rotate(self.base_quat, self.forward_vec)
         heading_root = torch.atan2(root_forward[:, 1], root_forward[:, 0])
-        aux["feet_heading_alignment"] = torch.abs(wrap_to_pi(torch.atan2(forward_left[:, 1], forward_left[:, 0]) - heading_root)) + torch.abs(
-            wrap_to_pi(torch.atan2(forward_right[:, 1], forward_right[:, 0]) - heading_root)
-        )
+        aux["feet_heading_alignment"] = torch.abs(
+            wrap_to_pi(torch.atan2(forward_left[:, 1], forward_left[:, 0]) - heading_root)
+        ) + torch.abs(wrap_to_pi(torch.atan2(forward_right[:, 1], forward_right[:, 0]) - heading_root))
 
         reward = torch.zeros(self.num_envs, device=self.device)
         for name, scale in self.reward_scales.items():
@@ -1140,63 +1504,33 @@ class HumanoidVerseMjlabCore:
 
     def _normalized_action(self, actions: torch.Tensor) -> torch.Tensor:
         if bool(self.config.robot.control.normalize_action):
-            actions = actions * float(self.config.robot.control.normalize_action_to) / float(self.config.robot.control.normalize_action_from)
-        return torch.clamp(actions, -float(self.config.robot.control.action_clip_value), float(self.config.robot.control.action_clip_value))
-
-    def _init_control_delay(self) -> None:
-        self.randomize_ctrl_delay = bool(self.config.domain_rand.get("randomize_ctrl_delay", False))
-        configured_range = _nonnegative_int_range(
-            self.config.domain_rand.get("ctrl_delay_step_range", [0, 0]),
-            "domain_rand.ctrl_delay_step_range",
-        )
-        self.ctrl_delay_step_range = configured_range if self.randomize_ctrl_delay else (0, 0)
-        self.ctrl_delay_steps = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
-        self._action_history = torch.zeros(
-            self.num_envs,
-            self.ctrl_delay_step_range[1] + 1,
-            self.num_dof,
-            device=self.device,
-        )
-        self._action_history_cursor = 0
-        self._control_delay_env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-
-    def _reset_control_delay(self, env_ids: torch.Tensor) -> None:
-        lower, upper = self.ctrl_delay_step_range
-        if self.randomize_ctrl_delay and lower < upper:
-            self.ctrl_delay_steps[env_ids] = torch.randint(
-                lower,
-                upper + 1,
-                (len(env_ids),),
-                device=self.device,
-                dtype=torch.long,
+            actions = (
+                actions * float(self.config.robot.control.normalize_action_to) / float(self.config.robot.control.normalize_action_from)
             )
-        else:
-            self.ctrl_delay_steps[env_ids] = lower
-        self._action_history[env_ids] = 0.0
-        self.applied_actions[env_ids] = 0.0
-
-    def _apply_control_delay(self, actions: torch.Tensor) -> torch.Tensor:
-        history_length = self._action_history.shape[1]
-        self._action_history_cursor = (self._action_history_cursor + 1) % history_length
-        self._action_history[:, self._action_history_cursor] = actions
-        history_indices = torch.remainder(self._action_history_cursor - self.ctrl_delay_steps, history_length)
-        self.applied_actions.copy_(self._action_history[self._control_delay_env_ids, history_indices])
-        return self.applied_actions
+        return torch.clamp(actions, -float(self.config.robot.control.action_clip_value), float(self.config.robot.control.action_clip_value))
 
     def _mjlab_action_input(self) -> torch.Tensor:
         action_indices = self._action_term_dof_indices
-        return self.applied_actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
+        return self.actions[:, action_indices] + self.default_dof_pos_offset[:, action_indices] / torch.clamp(
             self.action_target_scale[:, action_indices], min=1.0e-6
         )
+
+    def _sync_applied_actions(self) -> None:
+        """Expose the action currently applied after physics-step delay."""
+        action_indices = self._action_term_dof_indices
+        offset_in_action_space = self.default_dof_pos_offset[:, action_indices] / torch.clamp(
+            self.action_target_scale[:, action_indices], min=1.0e-6
+        )
+        self.applied_actions[:, action_indices] = self._action_term.applied_raw_action - offset_in_action_space
 
     def step(self, actions: torch.Tensor):
         actions = actions.to(self.device, dtype=torch.float32)
         self.last_actions[:] = self.actions
         self.last_dof_vel[:] = self.dof_vel
         self.actions[:] = self._normalized_action(actions)
-        self._apply_control_delay(self.actions)
         mjlab_actions = self._mjlab_action_input()
         _, _, terminated, time_outs, _ = self.mjlab_env.step(mjlab_actions)
+        self._sync_applied_actions()
         self._refresh_state()
         reward, aux = self._compute_reward()
         reset = torch.logical_or(terminated.bool(), time_outs.bool())
@@ -1251,7 +1585,7 @@ class HumanoidVerseMjlabCore:
                 if torch.any(mask):
                     root_pos = root_pos.clone()
                     root_rot = root_rot.clone()
-                    root_pos[mask, 2] = 0.5
+                    root_pos[mask, 2] = float(self.config.get("lie_down_init_height", 0.5))
                     sign = 1 if random.random() < 0.5 else -1
                     rot_quat = quat_from_angle_axis(
                         torch.tensor(sign * (-torch.pi / 2), device=self.device),
@@ -1259,7 +1593,9 @@ class HumanoidVerseMjlabCore:
                         w_last=True,
                     )
                     root_rot[mask] = quat_mul(rot_quat.expand_as(root_rot[mask]), root_rot[mask], w_last=True)
-            root_pos = root_pos + torch.randn_like(root_pos) * float(self.config.init_noise_scale.root_pos) * float(self.config.noise_to_initial_level)
+            root_pos = root_pos + torch.randn_like(root_pos) * float(self.config.init_noise_scale.root_pos) * float(
+                self.config.noise_to_initial_level
+            )
             root_rot = quat_mul(
                 _small_random_quaternions(
                     len(env_ids),
@@ -1269,17 +1605,19 @@ class HumanoidVerseMjlabCore:
                 root_rot,
                 w_last=True,
             )
-            root_vel = root_vel + torch.randn_like(root_vel) * float(self.config.init_noise_scale.root_vel) * float(self.config.noise_to_initial_level)
+            root_vel = root_vel + torch.randn_like(root_vel) * float(self.config.init_noise_scale.root_vel) * float(
+                self.config.noise_to_initial_level
+            )
             root_ang_vel = root_ang_vel + torch.randn_like(root_ang_vel) * float(self.config.init_noise_scale.root_ang_vel) * float(
                 self.config.noise_to_initial_level
             )
             root_xyzw = torch.cat([root_pos, root_rot, root_vel, root_ang_vel], dim=-1)
-            joint_pos = motion_res["dof_pos"] + torch.randn_like(motion_res["dof_pos"]) * float(self.config.init_noise_scale.dof_pos) * float(
-                self.config.noise_to_initial_level
-            )
-            joint_vel = motion_res["dof_vel"] + torch.randn_like(motion_res["dof_vel"]) * float(self.config.init_noise_scale.dof_vel) * float(
-                self.config.noise_to_initial_level
-            )
+            joint_pos = motion_res["dof_pos"] + torch.randn_like(motion_res["dof_pos"]) * float(
+                self.config.init_noise_scale.dof_pos
+            ) * float(self.config.noise_to_initial_level)
+            joint_vel = motion_res["dof_vel"] + torch.randn_like(motion_res["dof_vel"]) * float(
+                self.config.init_noise_scale.dof_vel
+            ) * float(self.config.noise_to_initial_level)
 
         root_wxyz = torch.cat([root_xyzw[:, :3], xyzw_to_wxyz(root_xyzw[:, 3:7]), root_xyzw[:, 7:13]], dim=-1)
         self.robot.write_root_state_to_sim(root_wxyz, env_ids=env_ids)
@@ -1289,9 +1627,10 @@ class HumanoidVerseMjlabCore:
         self.mjlab_env._manual_reset_pending[env_ids] = False
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
-        self._reset_control_delay(env_ids)
+        self.applied_actions[env_ids] = 0.0
         self.history_handler.reset(env_ids)
         self._refresh_state()
+        self._reset_imu_delay(env_ids)
         self.simulator.refresh()
 
     def set_is_evaluating(self, global_rank: int = 0):

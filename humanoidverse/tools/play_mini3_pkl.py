@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from humanoidverse.tools.play_robot_state_npz import (
+    apply_lie_down_reset_pose,
     build_qpos_trajectory,
     frame_bounds,
     load_playback_model,
@@ -86,6 +87,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--loop", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--follow-root", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--show-collision", action="store_true")
+    parser.add_argument(
+        "--preview-lie-down-reset",
+        action="store_true",
+        help="Apply the training reset's root rotation/height before playback (kinematic preview only).",
+    )
+    parser.add_argument("--lie-down-height", type=float, default=0.30, help="Root height used by --preview-lie-down-reset.")
+    parser.add_argument(
+        "--lie-down-angle-deg",
+        type=float,
+        choices=(-90.0, 90.0),
+        default=-90.0,
+        help="X-axis reset rotation used by --preview-lie-down-reset.",
+    )
     parser.add_argument("--camera-distance", type=float, default=1.5)
     parser.add_argument("--camera-azimuth", type=float, default=135.0)
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
@@ -113,6 +127,14 @@ def main(argv: list[str] | None = None) -> None:
     start_frame, end_frame = frame_bounds(motion.root_pos.shape[0], args.start_frame, args.end_frame)
     validate_joint_limits(motion, robot_spec, tolerance=np.deg2rad(args.joint_limit_tolerance_deg))
     qpos = build_qpos_trajectory(motion, robot_spec, model)
+    if args.preview_lie_down_reset:
+        qpos = apply_lie_down_reset_pose(
+            qpos,
+            robot_spec,
+            model,
+            root_height=float(args.lie_down_height),
+            angle_deg=float(args.lie_down_angle_deg),
+        )
     validated_frames = validate_forward_kinematics(
         model,
         qpos,
@@ -135,6 +157,10 @@ def main(argv: list[str] | None = None) -> None:
         f"  pkl_keys={list(loaded.source_keys)} root_rotation=direct:root_rot "
         f"source_quat_order={loaded.source_quat_order} fps_source={'override' if args.fps is not None else 'pkl'}"
     )
+    if args.preview_lie_down_reset:
+        print(
+            f"  lie_down_reset_preview=true root_height={args.lie_down_height:g}m x_rotation={args.lie_down_angle_deg:g}deg mode=kinematic"
+        )
     if args.check_only:
         print("Mini3 PKL check passed; root_rot was read directly and the viewer was not opened.")
         return

@@ -74,6 +74,10 @@ Mini3 的实际配置顺序可以概括为：
 training:
   hydra_robot: mini3/mini3_auto
   hydra_overrides:
+    # Simulation/control frequency
+    - "simulator.config.sim.fps=500"
+    - "simulator.config.sim.control_decimation=10"
+
     # Environment reward
     - "rewards.reward_scales.penalty_action_rate=-0.2"
     - "rewards.reward_scales.penalty_ankle_roll=-1.0"
@@ -85,12 +89,11 @@ training:
     - "domain_rand.base_com_range.x=[-0.03,0.03]"
     - "domain_rand.base_com_range.y=[-0.03,0.03]"
     - "domain_rand.link_mass_range=[0.98,1.02]"
-    - "domain_rand.friction_range=[0.7,2.2]"
+    - "domain_rand.friction_range=[0.5,2.2]"
     - "domain_rand.randomize_pd_gain=true"
     - "domain_rand.kp_range=[0.75,1.25]"
     - "domain_rand.kd_range=[0.75,1.25]"
     - "domain_rand.randomize_ctrl_delay=true"
-    - "domain_rand.ctrl_delay_step_range=[0,1]"
     - "domain_rand.randomize_motor_strength=true"
     - "domain_rand.motor_strength_range=[0.9,1.1]"
   agent:
@@ -104,14 +107,16 @@ training:
 
 - `penalty_action_rate = -0.2`
 - `penalty_ankle_roll = -1.0`
+- physics 为 500 Hz，policy/control update 为 50 Hz（decimation 10）
 - reward penalty curriculum 关闭
 - push 开启
 - base COM：x/y 均为 `[-0.03, 0.03]`
 - base COM 的 z 未被覆盖，继续继承共享值 `[-0.02, 0.02]`
 - link mass scale 为 `[0.98, 1.02]`
-- friction 为 `[0.7, 2.2]`
+- friction 为 `[0.5, 2.2]`
 - 每次 episode reset 独立采样 Kp/Kd 乘法系数，范围均为 `[0.75, 1.25]`
-- 每次 episode reset 独立采样 0 或 1 个控制步延迟；当前 50 Hz 控制频率下对应 0 或 20 ms
+- delay 按 actuator 组配置：4340P 固定 4 个仿真步（8 ms），脚踝每次 reset 在 3–5 步（6–10 ms）间采样，手臂为 0；FIFO 每个 physics substep 前进一步，不按 50 Hz policy step 计数
+- IMU delay 每个环境在 reset 时从 8–26 ms 均匀采样；`base_ang_vel` 与 `projected_gravity` 共用一个 500 Hz physics-step 环形缓冲，并对非整数延迟步插值。该延迟只进入 actor/history actor，privileged state 和 reward 仍读取实时状态
 - 每次 episode reset 将 DC motor 连续/峰值力矩能力同步缩放至 nominal 的 `[0.9, 1.1]`
 - FB auxiliary critic 实际使用 `penalty_action_rate=-0.2`、`penalty_ankle_roll=-1.0`
 
@@ -223,7 +228,7 @@ humanoidverse/config/domain_rand/domain_rand.yaml
 | `randomize_default_dof_pos` | 是 | reset 时加入默认关节位置偏移 |
 | `randomize_pd_gain` | 是 | 每次 episode reset 按环境和关节独立缩放 nominal Kp/Kd |
 | `randomize_motor_strength` | 是 | 每次 reset 同步缩放 DC motor 连续和峰值力矩能力 |
-| `randomize_ctrl_delay` | 是 | 每次 reset 按环境采样整数控制步延迟，并通过 action FIFO 执行 |
+| `randomize_ctrl_delay` | 是 | 启用 actuator 分组仿真步延迟；脚踝每次 reset 按环境采样，action FIFO 每个 physics substep 前进一步 |
 | `randomize_torque_rfi` / `randomize_rfi_lim` | 否 | YAML 有字段，但当前 MJLab 路径未实现 |
 | `randomize_base_mass` | 否 | YAML 有字段，但没有独立 MJLab 实现 |
 

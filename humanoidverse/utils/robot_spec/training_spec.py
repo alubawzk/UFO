@@ -88,6 +88,7 @@ class RobotTrainingSpec:
     velocity_limits: list[float]
     effort_limit_scale: float
     actuator: dict[str, Any]
+    imu_delay: dict[str, Any]
     contact_bodies: list[str]
     undesired_contact_bodies: list[str]
     torso_name: str
@@ -120,6 +121,7 @@ class RobotTrainingSpec:
             "velocity_limits": list(self.velocity_limits),
             "effort_limit_scale": self.effort_limit_scale,
             "actuator": dict(self.actuator),
+            "imu_delay": dict(self.imu_delay),
             "contact_bodies": list(self.contact_bodies),
             "undesired_contact_bodies": list(self.undesired_contact_bodies),
             "torso_name": self.torso_name,
@@ -155,6 +157,10 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
     control = _required_mapping(training, "control", context="training")
     init_state = _required_mapping(training, "init_state", context="training")
     actuator = _required_mapping(training, "actuator", context="training")
+    raw_imu_delay = training.get("imu_delay", {})
+    if not isinstance(raw_imu_delay, dict):
+        raise ValueError("training.imu_delay must be a mapping")
+    imu_delay = dict(raw_imu_delay)
     agent = training.get("agent") or {}
     if not isinstance(agent, dict):
         raise ValueError("training.agent must be a mapping")
@@ -199,6 +205,22 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
             if viscous_friction is not None:
                 float(viscous_friction)
 
+    if imu_delay:
+        time_range = imu_delay.get("time_range_s")
+        if not isinstance(time_range, list) or len(time_range) != 2:
+            raise ValueError("training.imu_delay.time_range_s must be a list with length 2")
+        delay_min_s, delay_max_s = (float(item) for item in time_range)
+        if not math.isfinite(delay_min_s) or not math.isfinite(delay_max_s):
+            raise ValueError("training.imu_delay.time_range_s must contain finite values")
+        if delay_min_s < 0.0 or delay_max_s < delay_min_s:
+            raise ValueError(f"training.imu_delay.time_range_s must satisfy 0 <= min <= max, got {time_range}")
+        imu_delay = {
+            "enabled": bool(imu_delay.get("enabled", False)),
+            "time_range_s": [delay_min_s, delay_max_s],
+            "randomize_on_reset": bool(imu_delay.get("randomize_on_reset", True)),
+            "interpolate": bool(imu_delay.get("interpolate", True)),
+        }
+
     semantic = dict(training.get("semantics") or {})
     contact_bodies = _required_name_list(semantic, "contact_bodies", context="training.semantics")
     undesired_contact_bodies = [str(item) for item in semantic.get("undesired_contact_bodies", [])]
@@ -228,6 +250,7 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
         velocity_limits=velocity_limits,
         effort_limit_scale=float(control.get("effort_limit_scale", 1.0)),
         actuator=actuator,
+        imu_delay=imu_delay,
         contact_bodies=contact_bodies,
         undesired_contact_bodies=undesired_contact_bodies,
         torso_name=torso_name,

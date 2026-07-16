@@ -42,7 +42,8 @@ domain_rand:
   rfi_lim_range : [0.5, 1.5]
 
 
-  # Per-episode action delay in control steps.
+  # Per-episode action delay in physics simulation steps. The delayed action
+  # FIFO advances once per simulator substep, not once per policy step.
   randomize_ctrl_delay : False
   ctrl_delay_step_range : [0, 1]
 

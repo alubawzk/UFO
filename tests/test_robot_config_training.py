@@ -14,6 +14,8 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     _compose_humanoidverse_config,
     _contact_force_mask,
     _randomize_dc_motor_strength,
+    _SimulationStepActionDelay,
+    _SimulationStepImuDelay,
     make_mjlab_ufo_env_cfg,
 )
 from humanoidverse.tracking_inference import (
@@ -186,6 +188,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
     def test_mini3_pd_gain_domain_randomization_builds_reset_event(self) -> None:
         from mjlab.envs.mdp import dr as mjlab_dr
 
+        training = load_robot_training_spec("configs/robots/mini3.yaml")
         hv_config, mjlab_config = _make_mini3_mjlab_cfg()
 
         self.assertTrue(hv_config.domain_rand.randomize_pd_gain)
@@ -198,8 +201,29 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertEqual(event.params["kd_range"], (0.75, 1.25))
         self.assertEqual(event.params["operation"], "scale")
 
+        self.assertTrue(hv_config.lie_down_init)
+        self.assertEqual(float(hv_config.lie_down_init_prob), 0.3)
+        self.assertEqual(float(hv_config.lie_down_init_height), 0.1)
         self.assertTrue(hv_config.domain_rand.randomize_ctrl_delay)
-        self.assertEqual(list(hv_config.domain_rand.ctrl_delay_step_range), [0, 1])
+        self.assertEqual(int(hv_config.simulator.config.sim.fps), 500)
+        self.assertEqual(int(hv_config.simulator.config.sim.control_decimation), 10)
+        self.assertEqual(mjlab_config.decimation, 10)
+        self.assertAlmostEqual(mjlab_config.sim.mujoco.timestep, 0.002)
+        action_cfg = mjlab_config.actions["actions"]
+        self.assertEqual(type(action_cfg).__name__, "SimulationStepDelayedJointPositionActionCfg")
+        delay_by_joint = dict(
+            zip(load_robot_training_spec("configs/robots/mini3.yaml").robot.control_joint_names, action_cfg.delay_step_ranges)
+        )
+        self.assertEqual(delay_by_joint["left_hip_pitch_joint"], (4, 4))
+        self.assertEqual(delay_by_joint["left_ankle_pitch_joint"], (3, 5))
+        self.assertEqual(delay_by_joint["left_shoulder_pitch_joint"], (0, 0))
+        self.assertEqual(action_cfg.delay_group_names.count("4340P"), 9)
+        self.assertEqual(action_cfg.delay_group_names.count("ankles"), 4)
+        self.assertEqual(action_cfg.delay_group_names.count("arms"), 8)
+        self.assertEqual(training.imu_delay["time_range_s"], [0.008, 0.026])
+        self.assertTrue(training.imu_delay["enabled"])
+        self.assertTrue(training.imu_delay["randomize_on_reset"])
+        self.assertTrue(training.imu_delay["interpolate"])
         self.assertTrue(hv_config.domain_rand.randomize_motor_strength)
         motor_event = mjlab_config.events["random_motor_strength"]
         self.assertEqual(motor_event.mode, "reset")
@@ -212,15 +236,14 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertFalse(hv_config.domain_rand.randomize_pd_gain)
         self.assertNotIn("random_pd_gains", mjlab_config.events)
         self.assertFalse(hv_config.domain_rand.randomize_ctrl_delay)
+        self.assertTrue(all(step_range == (0, 0) for step_range in mjlab_config.actions["actions"].delay_step_ranges))
         self.assertFalse(hv_config.domain_rand.randomize_motor_strength)
         self.assertNotIn("random_motor_strength", mjlab_config.events)
 
     def test_mini3_actuator_dynamics_reach_mjlab_cfg(self) -> None:
         training = load_robot_training_spec("configs/robots/mini3.yaml")
         _, mjlab_config = _make_mini3_mjlab_cfg(disable_domain_randomization=True)
-        actuators = {
-            actuator.target_names_expr[0]: actuator for actuator in mjlab_config.scene.entities["robot"].articulation.actuators
-        }
+        actuators = {actuator.target_names_expr[0]: actuator for actuator in mjlab_config.scene.entities["robot"].articulation.actuators}
 
         for joint_name in training.robot.control_joint_names:
             expected = training.actuator["joints"][joint_name]
@@ -337,7 +360,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
 
     def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)
-        core.applied_actions = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
+        core.actions = torch.tensor([[10.0, 20.0, 30.0, 40.0]])
         core.default_dof_pos_offset = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
         core.action_target_scale = torch.tensor([[1.0, 2.0, 1.0, 4.0]])
         core._action_term_dof_indices = torch.tensor([2, 0, 3, 1])
@@ -346,22 +369,82 @@ class RobotConfigTrainingTest(unittest.TestCase):
 
         torch.testing.assert_close(action_input, torch.tensor([[33.0, 11.0, 41.0, 21.0]]))
 
-    def test_control_delay_applies_per_environment_action_history(self) -> None:
-        core = object.__new__(HumanoidVerseMjlabCore)
-        core.config = OmegaConf.create({"domain_rand": {"randomize_ctrl_delay": True, "ctrl_delay_step_range": [0, 1]}})
-        core.num_envs = 2
-        core.num_dof = 2
-        core.device = "cpu"
-        core.actions = torch.zeros(2, 2)
-        core.applied_actions = torch.zeros_like(core.actions)
-        core._init_control_delay()
-        core.ctrl_delay_steps[:] = torch.tensor([0, 1])
+    def test_control_delay_fifo_advances_per_simulation_step(self) -> None:
+        delay = _SimulationStepActionDelay(
+            num_envs=2,
+            step_ranges=((0, 0), (1, 1)),
+            group_names=("immediate", "delayed"),
+            device="cpu",
+        )
+        delay.delay_steps[:] = torch.tensor([[0, 1], [0, 1]])
 
-        first = core._apply_control_delay(torch.tensor([[1.0, 2.0], [3.0, 4.0]])).clone()
-        second = core._apply_control_delay(torch.tensor([[5.0, 6.0], [7.0, 8.0]])).clone()
+        first = delay.push(torch.tensor([[1.0, 2.0], [3.0, 4.0]])).clone()
+        second = delay.push(torch.tensor([[5.0, 6.0], [7.0, 8.0]])).clone()
 
-        torch.testing.assert_close(first, torch.tensor([[1.0, 2.0], [0.0, 0.0]]))
-        torch.testing.assert_close(second, torch.tensor([[5.0, 6.0], [3.0, 4.0]]))
+        torch.testing.assert_close(first, torch.tensor([[1.0, 0.0], [3.0, 0.0]]))
+        torch.testing.assert_close(second, torch.tensor([[5.0, 2.0], [7.0, 4.0]]))
+
+    def test_control_delay_samples_once_per_actuator_group(self) -> None:
+        delay = _SimulationStepActionDelay(
+            num_envs=32,
+            step_ranges=((3, 5), (3, 5), (0, 0)),
+            group_names=("ankles", "ankles", "arms"),
+            device="cpu",
+        )
+
+        delay.reset()
+
+        torch.testing.assert_close(delay.delay_steps[:, 0], delay.delay_steps[:, 1])
+        self.assertTrue(torch.all((delay.delay_steps[:, 0] >= 3) & (delay.delay_steps[:, 0] <= 5)))
+        self.assertTrue(torch.all(delay.delay_steps[:, 2] == 0))
+
+    def test_imu_delay_fifo_advances_per_simulation_step(self) -> None:
+        delay = _SimulationStepImuDelay(
+            num_envs=1,
+            physics_dt=0.002,
+            time_range_s=(0.004, 0.004),
+            interpolate=True,
+            device="cpu",
+        )
+        delay.reset(torch.tensor([0]), torch.zeros(1, 6), resample=True)
+
+        for value in (1.0, 2.0, 3.0):
+            delay.record(torch.full((1, 6), value))
+
+        torch.testing.assert_close(delay.read(), torch.full((1, 6), 1.0))
+
+    def test_imu_delay_interpolates_fractional_physics_steps(self) -> None:
+        delay = _SimulationStepImuDelay(
+            num_envs=1,
+            physics_dt=0.002,
+            time_range_s=(0.003, 0.003),
+            interpolate=True,
+            device="cpu",
+        )
+        delay.reset(torch.tensor([0]), torch.zeros(1, 6), resample=True)
+
+        for value in (1.0, 2.0, 3.0):
+            delay.record(torch.full((1, 6), value))
+
+        torch.testing.assert_close(delay.read(), torch.full((1, 6), 1.5))
+
+    def test_imu_delay_reset_primes_only_selected_environments(self) -> None:
+        delay = _SimulationStepImuDelay(
+            num_envs=2,
+            physics_dt=0.002,
+            time_range_s=(0.0, 0.0),
+            interpolate=False,
+            device="cpu",
+        )
+        delay.reset(None, torch.zeros(2, 6), resample=True)
+        delay.record(torch.tensor([[1.0] * 6, [10.0] * 6]))
+        delay.reset(
+            torch.tensor([0]),
+            torch.tensor([[7.0] * 6, [10.0] * 6]),
+            resample=False,
+        )
+
+        torch.testing.assert_close(delay.read(), torch.tensor([[7.0] * 6, [10.0] * 6]))
 
     def test_yaml_actuator_missing_joint_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

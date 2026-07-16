@@ -132,6 +132,45 @@ def build_qpos_trajectory(motion: RobotStateMotion, robot_spec: RobotSpec, model
     return qpos
 
 
+def apply_lie_down_reset_pose(
+    qpos: np.ndarray,
+    robot_spec: RobotSpec,
+    model: mujoco.MjModel,
+    *,
+    root_height: float,
+    angle_deg: float,
+) -> np.ndarray:
+    """Apply the training reset's root-height and X-axis rotation to qpos frames."""
+
+    if not np.isfinite(root_height) or root_height <= 0.0:
+        raise ValueError(f"Lie-down root height must be finite and positive, got {root_height}")
+    if not np.isfinite(angle_deg):
+        raise ValueError(f"Lie-down angle must be finite, got {angle_deg}")
+    if robot_spec.free_joint is None:
+        raise ValueError(f"Robot={robot_spec.name} has no free joint for a lie-down reset pose")
+
+    free_joint_id = _joint_id(model, robot_spec.free_joint)
+    free_qpos_addr = int(model.jnt_qposadr[free_joint_id])
+    transformed = np.asarray(qpos, dtype=np.float64).copy()
+    transformed[:, free_qpos_addr + 2] = float(root_height)
+
+    angle_rad = np.deg2rad(float(angle_deg))
+    extra = np.array([np.cos(angle_rad / 2.0), np.sin(angle_rad / 2.0), 0.0, 0.0], dtype=np.float64)
+    original = transformed[:, free_qpos_addr + 3 : free_qpos_addr + 7].copy()
+    extra_vec = extra[1:]
+    original_vec = original[:, 1:]
+    rotated = np.empty_like(original)
+    rotated[:, 0] = extra[0] * original[:, 0] - original_vec @ extra_vec
+    rotated[:, 1:] = (
+        extra[0] * original_vec
+        + original[:, :1] * extra_vec[None, :]
+        + np.cross(np.broadcast_to(extra_vec, original_vec.shape), original_vec)
+    )
+    rotated /= np.linalg.norm(rotated, axis=1, keepdims=True)
+    transformed[:, free_qpos_addr + 3 : free_qpos_addr + 7] = rotated
+    return transformed
+
+
 def validate_forward_kinematics(
     model: mujoco.MjModel,
     qpos: np.ndarray,

@@ -8,6 +8,7 @@ import mujoco
 import numpy as np
 
 from humanoidverse.tools.play_robot_state_npz import (
+    apply_lie_down_reset_pose,
     build_qpos_trajectory,
     load_npz_motion,
     load_playback_model,
@@ -84,6 +85,28 @@ class PlayRobotStateNpzTest(unittest.TestCase):
         motion.dof_pos[1, 0] = 10.0
         with self.assertRaisesRegex(ValueError, "left_hip_pitch_joint"):
             validate_joint_limits(motion, self.robot_spec)
+
+    def test_lie_down_preview_matches_training_root_transform(self) -> None:
+        qpos = build_qpos_trajectory(self._motion(), self.robot_spec, self.model)
+        transformed = apply_lie_down_reset_pose(
+            qpos,
+            self.robot_spec,
+            self.model,
+            root_height=0.30,
+            angle_deg=-90.0,
+        )
+
+        free_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, self.robot_spec.free_joint)
+        free_addr = int(self.model.jnt_qposadr[free_id])
+        np.testing.assert_allclose(transformed[:, free_addr + 2], 0.30, atol=0.0)
+        expected_identity_rotation = np.asarray([np.sqrt(0.5), -np.sqrt(0.5), 0.0, 0.0])
+        np.testing.assert_allclose(
+            transformed[0, free_addr + 3 : free_addr + 7],
+            expected_identity_rotation,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(np.linalg.norm(transformed[:, free_addr + 3 : free_addr + 7], axis=1), 1.0, atol=1.0e-12)
+        np.testing.assert_allclose(qpos[:, free_addr + 2], self._motion().root_pos[:, 2], atol=1.0e-7)
 
     def test_npz_reader_reorders_named_joints_before_playback(self) -> None:
         motion = self._motion()
