@@ -200,7 +200,7 @@ nohup bash -lc '
   source /root/.local/bin/env &&
   source .venv/bin/activate &&
   export PYTHONUNBUFFERED=1 &&
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 ./run_train.sh \
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ./run_train.sh \
     --agent fb \
     --robot-config configs/robots/mini3.yaml \
     --data-manifest configs/data/lafan1_mini3.yaml \
@@ -209,8 +209,8 @@ nohup bash -lc '
     --num-env-steps 192000000 \
     --buffer-size 1500000 \
     --checkpoint-every-steps 3200000 \
-    --work-dir runs/ufo_fb_lafan1_mini3_7gpu_buf1500k
-' > /home/wzk/UFO/ufo_fb_lafan1_mini3_7gpu_buf1500k.log 2>&1 &
+    --work-dir runs/ufo_fb_lafan1_mini3_7gpu_ReviseFeetRoll_AddJointParams
+' > /home/wzk/UFO/ufo_fb_lafan1_mini3_AddJointParams.log 2>&1 &
 
 ## 查看gpu占用
 watch -n 2 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw --format=csv,noheader'
