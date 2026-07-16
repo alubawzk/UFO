@@ -215,6 +215,20 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertFalse(hv_config.domain_rand.randomize_motor_strength)
         self.assertNotIn("random_motor_strength", mjlab_config.events)
 
+    def test_mini3_actuator_dynamics_reach_mjlab_cfg(self) -> None:
+        training = load_robot_training_spec("configs/robots/mini3.yaml")
+        _, mjlab_config = _make_mini3_mjlab_cfg(disable_domain_randomization=True)
+        actuators = {
+            actuator.target_names_expr[0]: actuator for actuator in mjlab_config.scene.entities["robot"].articulation.actuators
+        }
+
+        for joint_name in training.robot.control_joint_names:
+            expected = training.actuator["joints"][joint_name]
+            actuator = actuators[joint_name]
+            self.assertEqual(actuator.armature, expected["armature"])
+            self.assertEqual(actuator.frictionloss, expected["friction"])
+            self.assertEqual(actuator.viscous_damping, expected["viscous_friction"])
+
     def test_mini3_fb_aux_reward_overrides_reach_agent_config(self) -> None:
         cfg = build_ufo_mjlab_config(
             device="cpu",

@@ -96,6 +96,18 @@ class Mini3RobotConfigTest(unittest.TestCase):
         self.assertEqual(training.left_ankle_dof_names, ["left_ankle_pitch_joint", "left_ankle_roll_joint"])
         self.assertEqual(training.right_ankle_dof_names, ["right_ankle_pitch_joint", "right_ankle_roll_joint"])
 
+    def test_mjcf_joint_dynamics_match_training_actuator_config(self) -> None:
+        training = load_robot_training_spec(ROBOT_CONFIG)
+        model = mujoco.MjModel.from_xml_path(str(XML_PATH))
+
+        for joint_name in CONTROL_JOINTS:
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            dof_id = int(model.jnt_dofadr[joint_id])
+            expected = training.actuator["joints"][joint_name]
+            self.assertAlmostEqual(float(model.dof_armature[dof_id]), expected["armature"])
+            self.assertAlmostEqual(float(model.dof_frictionloss[dof_id]), expected["friction"])
+            self.assertAlmostEqual(float(model.dof_damping[dof_id]), expected["viscous_friction"])
+
     def test_hydra_config_dimensions_and_order_match_robot_spec(self) -> None:
         cfg = OmegaConf.load(HYDRA_CONFIG).robot
         self.assertEqual(cfg.num_bodies, 24)

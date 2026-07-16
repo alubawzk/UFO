@@ -318,7 +318,9 @@ def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | N
     config.robot.motion.nums_extend_bodies = len(extend_config)
 
 
-def _actuator_params_from_training(dof_names: tp.Sequence[str], robot_training: dict[str, Any] | None) -> tuple[str, dict[str, list[float]]]:
+def _actuator_params_from_training(
+    dof_names: tp.Sequence[str], robot_training: dict[str, Any] | None
+) -> tuple[str, dict[str, list[float | None]]]:
     if not robot_training:
         return G1_MJLAB_ACTUATOR_SOURCE, _g1_mjlab_mode15_actuator_params(dof_names)
     actuator = dict(robot_training.get("actuator") or {})
@@ -330,15 +332,23 @@ def _actuator_params_from_training(dof_names: tp.Sequence[str], robot_training: 
     joints = actuator.get("joints")
     if not isinstance(joints, dict):
         raise ValueError("training.actuator.source=yaml requires training.actuator.joints")
-    params = {"effort_limit": [], "velocity_limit": [], "armature": [], "friction": []}
+    params: dict[str, list[float | None]] = {
+        "effort_limit": [],
+        "velocity_limit": [],
+        "armature": [],
+        "friction": [],
+        "viscous_friction": [],
+    }
     for joint_name in dof_names:
         joint_params = joints.get(joint_name)
         if not isinstance(joint_params, dict):
             raise ValueError(f"training.actuator.joints is missing parameters for joint {joint_name!r}")
-        for key in params:
+        for key in ("effort_limit", "velocity_limit", "armature", "friction"):
             if key not in joint_params:
                 raise ValueError(f"training.actuator.joints.{joint_name} is missing '{key}'")
             params[key].append(float(joint_params[key]))
+        viscous_friction = joint_params.get("viscous_friction", joint_params.get("damping"))
+        params["viscous_friction"].append(None if viscous_friction is None else float(viscous_friction))
     return source, params
 
 
@@ -496,6 +506,7 @@ def make_mjlab_ufo_env_cfg(
     velocity_limits = actuator_params["velocity_limit"]
     armature = actuator_params["armature"]
     friction = actuator_params["friction"]
+    viscous_friction = actuator_params.get("viscous_friction", [None] * len(dof_names))
 
     actuators = []
     action_scale = {}
@@ -513,6 +524,7 @@ def make_mjlab_ufo_env_cfg(
                 velocity_limit=velocity_limits[i],
                 armature=armature[i] if i < len(armature) else None,
                 frictionloss=friction[i] if i < len(friction) else None,
+                viscous_damping=viscous_friction[i] if i < len(viscous_friction) else None,
             )
         )
 
@@ -536,7 +548,7 @@ def make_mjlab_ufo_env_cfg(
         f"kp={[_match_joint_value(name, stiffness) for name in dof_names]}, "
         f"kd={[_match_joint_value(name, damping) for name in dof_names]}, "
         f"effort_limit={effort_limits}, velocity_limit={velocity_limits}, "
-        f"armature={armature}, friction={friction}, "
+        f"armature={armature}, friction={friction}, viscous_friction={viscous_friction}, "
         f"dof_effort_limit_scale={effort_scale} ignored_for_mjlab_actuator_limits",
         flush=True,
     )

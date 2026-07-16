@@ -181,30 +181,31 @@ training:
       right_elbow_pitch_joint: 1.0
 
   # Mini3 must use YAML actuator values; the G1 mode-15 preset is robot-specific.
+  # friction is Coulomb frictionloss; viscous_friction maps to MuJoCo joint damping.
   actuator:
     source: yaml
     joints:
-      left_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      left_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      left_hip_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      left_knee_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      left_ankle_pitch_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
-      left_ankle_roll_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
-      right_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      right_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      right_hip_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      right_knee_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      right_ankle_pitch_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
-      right_ankle_roll_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 1.0}
-      waist_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 0.0}
-      left_shoulder_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      left_shoulder_roll_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      left_shoulder_yaw_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      left_elbow_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      right_shoulder_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      right_shoulder_roll_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      right_shoulder_yaw_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
-      right_elbow_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7}
+      left_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      left_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      left_hip_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      left_knee_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      left_ankle_pitch_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 0.7, viscous_friction: 0.1}
+      left_ankle_roll_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 0.7, viscous_friction: 0.1}
+      right_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      right_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      right_hip_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      right_knee_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      right_ankle_pitch_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 0.7, viscous_friction: 0.1}
+      right_ankle_roll_joint: {effort_limit: 25.0, velocity_limit: 45.0, armature: 0.01, friction: 0.7, viscous_friction: 0.1}
+      waist_yaw_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
+      left_shoulder_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      left_shoulder_roll_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      left_shoulder_yaw_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      left_elbow_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      right_shoulder_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      right_shoulder_roll_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      right_shoulder_yaw_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
+      right_elbow_pitch_joint: {effort_limit: 12.5, velocity_limit: 45.0, armature: 0.0019, friction: 0.7, viscous_friction: 0.1}
 
 metadata:
   generated_from_xml: humanoidverse/data/robots/mini3_mjlab/mini3.xml

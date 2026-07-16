@@ -195,6 +195,9 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
                 if key not in params:
                     raise ValueError(f"training.actuator.joints.{joint} is missing '{key}'")
                 float(params[key])
+            viscous_friction = params.get("viscous_friction", params.get("damping"))
+            if viscous_friction is not None:
+                float(viscous_friction)
 
     semantic = dict(training.get("semantics") or {})
     contact_bodies = _required_name_list(semantic, "contact_bodies", context="training.semantics")
