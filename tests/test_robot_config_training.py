@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabCore,
     _compose_humanoidverse_config,
+    _contact_force_mask,
     _randomize_dc_motor_strength,
     make_mjlab_ufo_env_cfg,
 )
@@ -306,6 +307,19 @@ class RobotConfigTrainingTest(unittest.TestCase):
             "robot.left_ankle_dof_names, robot.right_ankle_dof_names.*penalty_ankle_roll",
         ):
             core._validate_aux_reward_semantics(cfg)
+
+    def test_mjlab_contact_force_mask_accepts_negative_ground_force(self) -> None:
+        contact_forces = torch.tensor(
+            [
+                [0.0, 0.0, -2.0],
+                [0.0, 0.0, 2.0],
+                [0.0, 0.0, -0.5],
+            ]
+        )
+
+        mask = _contact_force_mask(contact_forces)
+
+        torch.testing.assert_close(mask, torch.tensor([True, True, False]))
 
     def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)

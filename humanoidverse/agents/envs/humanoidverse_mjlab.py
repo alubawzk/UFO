@@ -132,6 +132,19 @@ def _zero_reward(env):
     return torch.zeros(env.num_envs, device=env.device)
 
 
+def _contact_force_mask(contact_forces: torch.Tensor, threshold: float = 1.0) -> torch.Tensor:
+    """Return contacts whose force magnitude exceeds ``threshold``.
+
+    MJLab's MuJoCo contact sensor orients a primary body's force toward the
+    other contact body, so a foot pressing on the ground commonly has a
+    negative world-frame Z component. A magnitude check is independent of
+    that primary/secondary direction convention.
+    """
+    if contact_forces.shape[-1] != 3:
+        raise ValueError(f"Expected contact forces with a final dimension of 3, got {tuple(contact_forces.shape)}")
+    return torch.linalg.vector_norm(contact_forces, dim=-1) > float(threshold)
+
+
 def _to_list(value) -> list:
     if value is None:
         return []
@@ -1068,7 +1081,7 @@ class HumanoidVerseMjlabCore:
     def _compute_reward(self) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         aux: dict[str, torch.Tensor] = {}
         contact = self.contact_forces
-        foot_contact = contact[:, self.feet_indices, 2] > 1.0
+        foot_contact = _contact_force_mask(contact[:, self.feet_indices, :])
         aux["penalty_torques"] = torch.sum(torch.square(self.torques), dim=1)
         aux["penalty_action_rate"] = torch.sum(torch.square(self.last_actions - self.actions), dim=1)
         lower, upper = self.dof_pos_limits[:, 0], self.dof_pos_limits[:, 1]
@@ -1094,7 +1107,7 @@ class HumanoidVerseMjlabCore:
             + torch.sum(torch.square(right_gravity[:, :2]), dim=1).sqrt() * foot_contact[:, 1]
         )
         foot_vel = self.body_vel[:, self.feet_indices]
-        aux["penalty_slippage"] = torch.sum(torch.norm(foot_vel, dim=-1) * (torch.norm(contact[:, self.feet_indices, :], dim=-1) > 1.0), dim=1)
+        aux["penalty_slippage"] = torch.sum(torch.norm(foot_vel, dim=-1) * foot_contact, dim=1)
         forward_left = my_quat_rotate(left_quat, self.forward_vec)
         forward_right = my_quat_rotate(right_quat, self.forward_vec)
         root_forward = my_quat_rotate(self.base_quat, self.forward_vec)
