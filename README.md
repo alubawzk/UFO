@@ -162,6 +162,18 @@ uv run python -m humanoidverse.tracking_inference \
   --save-mp4 \
   --motion-list 0 \
   --export-onnx true
+
+CUDA_VISIBLE_DEVICES=0 \
+uv run python -m humanoidverse.tracking_inference \
+  --model-folder runs/ufo_fb_lafan1_mini3_7gpu_ReviseFeetRoll_AddJointParams_LieDown_Delay \
+  --data-path humanoidverse/data/lafan1_mini3_ufo/fallAndGetUp1_subject1__clip004.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless \
+  --save-mp4 \
+  --motion-list 0 \
+  --export-onnx true
+```
 ```
 
 Outputs are written to `<model-folder>/tracking_inference/`. With `--export-onnx`, tracking inference exports a robot-config-aware ONNX policy and a companion metadata JSON. The metadata records the robot config, XML path, controlled joints, actor input dimensions, z dimension, actor observation dimension, and output action dimension.

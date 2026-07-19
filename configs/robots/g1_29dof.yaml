@@ -84,6 +84,8 @@ training:
       right_wrist_yaw_joint: 0.0
   control:
     action_scale: 0.25
+    # Preserve the original BFM-Zero torque-normalized position residual.
+    action_rescale: true
     action_clip_value: 5.0
     normalize_action_to: 5.0
     effort_limit_scale: 0.8

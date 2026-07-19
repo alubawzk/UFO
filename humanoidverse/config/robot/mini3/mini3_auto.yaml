@@ -161,12 +161,12 @@ robot:
       right_elbow_pitch_joint: 1.0
     integral: {hip: 0.0, knee: 0.0, ankle: 0.0, waist: 0.0, shoulder: 0.0, elbow: 0.0}
     action_scale: 0.25
-    action_clip_value: 5.0
-    action_rescale: true
+    action_clip_value: 8.0
+    action_rescale: false
     clip_torques: true
     normalize_action: true
     normalize_action_from: 1.0
-    normalize_action_to: 5.0
+    normalize_action_to: 8.0
 
   asset:
     collapse_fixed_joints: true

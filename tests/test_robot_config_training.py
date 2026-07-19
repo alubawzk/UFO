@@ -225,6 +225,12 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertTrue(training.imu_delay["randomize_on_reset"])
         self.assertTrue(training.imu_delay["interpolate"])
         self.assertTrue(hv_config.domain_rand.randomize_motor_strength)
+        self.assertFalse(training.action_rescale)
+        self.assertFalse(hv_config.robot.control.action_rescale)
+        self.assertEqual(training.action_clip_value, 8.0)
+        self.assertEqual(training.normalize_action_to, 8.0)
+        self.assertEqual(float(hv_config.robot.control.action_clip_value), 8.0)
+        self.assertEqual(float(hv_config.robot.control.normalize_action_to), 8.0)
         motor_event = mjlab_config.events["random_motor_strength"]
         self.assertEqual(motor_event.mode, "reset")
         self.assertIs(motor_event.func, _randomize_dc_motor_strength)
@@ -251,6 +257,17 @@ class RobotConfigTrainingTest(unittest.TestCase):
             self.assertEqual(actuator.armature, expected["armature"])
             self.assertEqual(actuator.frictionloss, expected["friction"])
             self.assertEqual(actuator.viscous_damping, expected["viscous_friction"])
+
+        action_cfg = mjlab_config.actions["actions"]
+        self.assertEqual(set(action_cfg.scale), set(training.robot.control_joint_names))
+        for joint_name in training.robot.control_joint_names:
+            self.assertEqual(action_cfg.scale[joint_name], training.action_scale)
+
+    def test_g1_preserves_bfm_action_rescale(self) -> None:
+        training = load_robot_training_spec("configs/robots/g1_29dof.yaml")
+
+        self.assertTrue(training.action_rescale)
+        self.assertTrue(training.to_env_dict()["action_rescale"])
 
     def test_mini3_fb_aux_reward_overrides_reach_agent_config(self) -> None:
         cfg = build_ufo_mjlab_config(

@@ -209,8 +209,12 @@ nohup bash -lc '
     --num-env-steps 192000000 \
     --buffer-size 1500000 \
     --checkpoint-every-steps 3200000 \
+    --cartwheel-aux-safe \
     --work-dir runs/ufo_fb_lafan1_mini3_7gpu_ReviseFeetRoll_AddJointParams
 ' > /home/wzk/UFO/ufo_fb_lafan1_mini3_AddJointParams.log 2>&1 &
+
+# 跌倒/爬起动作使用 --cartwheel-aux-safe：关闭非期望接触、脚部姿态、
+# 朝向、打滑和踝关节 roll 惩罚，并减小 action-rate 惩罚；关节位置与力矩限制仍保留。
 
 ## 查看gpu占用
 watch -n 2 'nvidia-smi --query-gpu=index,utilization.gpu,memory.used,power.draw --format=csv,noheader'

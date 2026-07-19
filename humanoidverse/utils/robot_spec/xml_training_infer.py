@@ -87,7 +87,13 @@ def infer_freejoint_base_body(model: mujoco.MjModel) -> tuple[str, str | None, l
             return body_name, joint_name, []
     body_names = infer_body_names_from_xml(model)
     fallback = body_names[0] if body_names else ""
-    return fallback, None, [f"No freejoint found in XML; using first non-world body as base_body={fallback!r}. Training a floating humanoid usually requires a freejoint."]
+    return (
+        fallback,
+        None,
+        [
+            f"No freejoint found in XML; using first non-world body as base_body={fallback!r}. Training a floating humanoid usually requires a freejoint."
+        ],
+    )
 
 
 def _joint_id_map(model: mujoco.MjModel) -> dict[str, int]:
@@ -105,7 +111,9 @@ def _actuator_for_joint(model: mujoco.MjModel, joint_name: str) -> int | None:
     return None
 
 
-def infer_joint_ranges_from_xml(model: mujoco.MjModel, control_joints: list[str]) -> tuple[dict[str, list[float]], list[str], list[list[float]]]:
+def infer_joint_ranges_from_xml(
+    model: mujoco.MjModel, control_joints: list[str]
+) -> tuple[dict[str, list[float]], list[str], list[list[float]]]:
     joint_ids = _joint_id_map(model)
     ranges: dict[str, list[float]] = {}
     lower: list[float] = []
@@ -155,7 +163,9 @@ def infer_actuator_limits_from_xml(
             effort_limit = float(effort_limit_default)
             warnings.append(f"Joint {joint_name!r} has no actuator force/ctrl range; using effort_limit_default={effort_limit_default}.")
         velocity_limit = float(velocity_limit_default)
-        warnings.append(f"Joint {joint_name!r} velocity limit is not reliably represented in MJCF; using velocity_limit_default={velocity_limit_default}.")
+        warnings.append(
+            f"Joint {joint_name!r} velocity limit is not reliably represented in MJCF; using velocity_limit_default={velocity_limit_default}."
+        )
         dof_addr = int(model.jnt_dofadr[joint_id])
         armature = float(model.dof_armature[dof_addr]) if dof_addr >= 0 else float(armature_default)
         friction = float(model.dof_frictionloss[dof_addr]) if dof_addr >= 0 else float(friction_default)
@@ -321,7 +331,10 @@ def merge_xml_urdf_training_hints(
             lo, hi = urdf_lo, urdf_hi
         elif xml_limited:
             lo, hi = xml_lo, xml_hi
-            if urdf_has_range and (abs(xml_lo - float(urdf_joint.limit_lower)) > range_warning_threshold or abs(xml_hi - float(urdf_joint.limit_upper)) > range_warning_threshold):
+            if urdf_has_range and (
+                abs(xml_lo - float(urdf_joint.limit_lower)) > range_warning_threshold
+                or abs(xml_hi - float(urdf_joint.limit_upper)) > range_warning_threshold
+            ):
                 warnings.append(
                     f"URDF limits for {joint_name!r} differ from XML limits; keeping XML limits because MuJoCo XML is the default source of truth."
                 )
@@ -480,11 +493,7 @@ def infer_semantics_from_names(body_names: list[str], joint_names: list[str]) ->
     if not torso_candidates:
         torso_candidates = [name for name in body_names if "waist" in name.lower()]
     torso_name = torso_candidates[0] if torso_candidates else (body_names[0] if body_names else "")
-    undesired = [
-        name
-        for name in body_names
-        if _contains_any(name, ("pelvis", "hip", "shoulder", "torso", "trunk", "chest"))
-    ]
+    undesired = [name for name in body_names if _contains_any(name, ("pelvis", "hip", "shoulder", "torso", "trunk", "chest"))]
     left_ankle = [name for name in joint_names if _is_left(name) and "ankle" in name.lower()]
     right_ankle = [name for name in joint_names if _is_right(name) and "ankle" in name.lower()]
     warnings: list[str] = []
@@ -558,6 +567,7 @@ def build_robot_training_yaml_draft(
     default_keyframe: str = "stand",
     actuator_source: str = "yaml",
     action_scale: float = 0.25,
+    action_rescale: bool = True,
     action_clip_value: float = 5.0,
     normalize_action_to: float = 5.0,
     effort_limit_default: float = 80.0,
@@ -588,7 +598,9 @@ def build_robot_training_yaml_draft(
         if semantics.get("hands"):
             merged_semantics["hands"] = list(semantics["hands"])
         merged_semantics["torso_name"] = str(merged_semantics.get("torso_name") or base_body)
-    key_bodies = _ordered_unique([base_body, merged_semantics.get("torso_name", ""), *(merged_semantics.get("feet") or []), *(merged_semantics.get("hands") or [])])
+    key_bodies = _ordered_unique(
+        [base_body, merged_semantics.get("torso_name", ""), *(merged_semantics.get("feet") or []), *(merged_semantics.get("hands") or [])]
+    )
     if semantics and semantics.get("key_bodies"):
         key_bodies = list(semantics["key_bodies"])
     urdf_metadata: dict[str, Any] = {}
@@ -636,10 +648,14 @@ def build_robot_training_yaml_draft(
     if actuator_source != "yaml":
         warnings.append(f"actuator.source={actuator_source!r} was requested; non-yaml sources are not recommended for new robots.")
     if len(merged_semantics.get("contact_bodies") or []) < 2:
-        warnings.append("contact_bodies has fewer than two entries; smoke may run but biped auxiliary rewards can require manual contact body setup.")
+        warnings.append(
+            "contact_bodies has fewer than two entries; smoke may run but biped auxiliary rewards can require manual contact body setup."
+        )
     if urdf_info is None:
         warnings.append("symmetric_dofs_idx was not generated because reliable symmetry inference is robot-specific.")
-    warnings.append("This config is XML-derived draft output. Review semantic fields, PD gains, default pose, actuator parameters, contact bodies, and reward/termination-related fields before formal training.")
+    warnings.append(
+        "This config is XML-derived draft output. Review semantic fields, PD gains, default pose, actuator parameters, contact bodies, and reward/termination-related fields before formal training."
+    )
     metadata = {
         "generated_from_xml": str(xml_path),
         "generated_by": "humanoidverse.tools.robot_inspect",
@@ -676,6 +692,7 @@ def build_robot_training_yaml_draft(
             },
             "control": {
                 "action_scale": float(action_scale),
+                "action_rescale": bool(action_rescale),
                 "action_clip_value": float(action_clip_value),
                 "normalize_action_to": float(normalize_action_to),
                 "effort_limit_scale": 1.0,
@@ -754,10 +771,17 @@ def build_hydra_robot_config_draft(
     upper_count = len(groups["upper_dof_names"])
     contact_bodies = list(semantics.get("contact_bodies") or [])
     left_contact = next((name for name in contact_bodies if _is_left(name)), _first_or_empty(contact_bodies))
-    right_contact = next((name for name in contact_bodies if _is_right(name)), contact_bodies[1] if len(contact_bodies) > 1 else _first_or_empty(contact_bodies))
+    right_contact = next(
+        (name for name in contact_bodies if _is_right(name)),
+        contact_bodies[1] if len(contact_bodies) > 1 else _first_or_empty(contact_bodies),
+    )
     knee_names = list(groups["knee_dof_names"])
     urdf_assisted = bool(metadata.get("urdf_source"))
-    foot_name = _common_side_suffix(contact_bodies, "ankle") if urdf_assisted else (_suffix_pattern(contact_bodies, "foot") or _suffix_pattern(contact_bodies, "ankle"))
+    foot_name = (
+        _common_side_suffix(contact_bodies, "ankle")
+        if urdf_assisted
+        else (_suffix_pattern(contact_bodies, "foot") or _suffix_pattern(contact_bodies, "ankle"))
+    )
     knee_body_names = [name for name in body_names if "knee" in name.lower()]
     knee_name = _common_side_suffix(knee_body_names, "knee") if urdf_assisted else _suffix_pattern(knee_names, "knee")
     robot_metadata = {
@@ -772,12 +796,12 @@ def build_hydra_robot_config_draft(
         robot_metadata["merge_policy"] = metadata["merge_policy"]
     if metadata.get("symmetric_dofs_idx_draft"):
         robot_metadata["symmetric_dofs_idx_draft"] = metadata["symmetric_dofs_idx_draft"]
-        robot_metadata["warnings"].append("symmetric_dofs_idx is emitted as draft metadata only; current training/inference does not consume it.")
+        robot_metadata["warnings"].append(
+            "symmetric_dofs_idx is emitted as draft metadata only; current training/inference does not consume it."
+        )
     else:
         robot_metadata["warnings"].append("symmetric_dofs_idx was not generated because reliable symmetry inference is robot-specific.")
-    randomize = [
-        name for name in body_names if _contains_any(name, ("pelvis", "hip", "thigh", "torso", "trunk", "waist", "knee"))
-    ][:12]
+    randomize = [name for name in body_names if _contains_any(name, ("pelvis", "hip", "thigh", "torso", "trunk", "waist", "knee"))][:12]
     xml_path = Path(str(robot_config["xml_path"])).expanduser()
     return {
         "defaults": ["robot_base"],
@@ -824,7 +848,7 @@ def build_hydra_robot_config_draft(
                 "integral": integral,
                 "action_scale": float(training["control"]["action_scale"]),
                 "action_clip_value": float(training["control"]["action_clip_value"]),
-                "action_rescale": True,
+                "action_rescale": bool(training["control"].get("action_rescale", True)),
                 "clip_torques": True,
                 "normalize_action": True,
                 "normalize_action_from": 1.0,

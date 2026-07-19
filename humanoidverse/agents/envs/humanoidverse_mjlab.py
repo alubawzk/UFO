@@ -444,6 +444,7 @@ def _patch_humanoidverse_robot_config(config, robot_training: dict[str, Any] | N
     config.robot.control.stiffness = dict(robot_training["stiffness"])
     config.robot.control.damping = dict(robot_training["damping"])
     config.robot.control.action_scale = float(robot_training["action_scale"])
+    config.robot.control.action_rescale = bool(robot_training.get("action_rescale", True))
     config.robot.control.action_clip_value = float(robot_training["action_clip_value"])
     config.robot.control.normalize_action_to = float(robot_training["normalize_action_to"])
 
@@ -816,6 +817,7 @@ def make_mjlab_ufo_env_cfg(
         "[INFO] MJLab asset: "
         f"xml_path={xml_path}, actuator_source={actuator_source}, "
         f"actuator_count={len(actuators)}, joint_order={list(dof_names)}, "
+        f"action_rescale={bool(config.robot.control.action_rescale)}, "
         f"action_scale={[action_scale[name] for name in dof_names]}, "
         f"kp={[_match_joint_value(name, stiffness) for name in dof_names]}, "
         f"kd={[_match_joint_value(name, damping) for name in dof_names]}, "

@@ -13,7 +13,6 @@ from humanoidverse.tools.robot_inspect import infer_hydra_robot_group, infer_rob
 from humanoidverse.utils.robot_spec import load_robot_spec, load_robot_training_spec
 from humanoidverse.utils.robot_spec.xml_training_infer import infer_control_joints_from_xml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -144,6 +143,9 @@ class RobotXmlHydraGenerationTest(unittest.TestCase):
                 self.assertEqual(len(spec.velocity_limits), len(spec.robot.control_joint_names))
                 self.assertEqual(set(spec.default_joint_angles), set(spec.robot.control_joint_names))
                 self.assertEqual(spec.actuator["source"], "yaml")
+                self.assertTrue(spec.action_rescale)
+                self.assertTrue(robot_config["training"]["control"]["action_rescale"])
+                self.assertTrue(hydra_config["robot"]["control"]["action_rescale"])
                 for joint in spec.robot.control_joint_names:
                     params = spec.actuator["joints"][joint]
                     for key in ("effort_limit", "velocity_limit", "armature", "friction"):
@@ -229,9 +231,7 @@ class RobotXmlHydraGenerationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             xml = _write_xml(root)
-            result = _run_robot_inspect(
-                ["--xml", str(xml), "--name", "tiny_hydra", "--out", str(root / "tiny.yaml"), "--with-training"]
-            )
+            result = _run_robot_inspect(["--xml", str(xml), "--name", "tiny_hydra", "--out", str(root / "tiny.yaml"), "--with-training"])
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--with-training requires either --hydra-out or --hydra-robot", result.stderr + result.stdout)
 

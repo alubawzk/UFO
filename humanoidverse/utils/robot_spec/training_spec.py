@@ -39,6 +39,13 @@ def _required_float(config: dict[str, Any], key: str, *, context: str) -> float:
         raise ValueError(f"{context}.{key} must be numeric, got {config[key]!r}") from exc
 
 
+def _optional_bool(config: dict[str, Any], key: str, *, default: bool, context: str) -> bool:
+    value = config.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{context}.{key} must be boolean, got {value!r}")
+    return value
+
+
 def _required_float_list(config: dict[str, Any], key: str, *, length: int, context: str) -> list[float]:
     value = config.get(key)
     if not isinstance(value, list) or len(value) != length:
@@ -78,6 +85,7 @@ class RobotTrainingSpec:
     hydra_overrides: list[str]
     fb_aux_rewards_scaling: dict[str, float]
     action_scale: float
+    action_rescale: bool
     action_clip_value: float
     normalize_action_to: float
     init_state: dict[str, list[float]]
@@ -111,6 +119,7 @@ class RobotTrainingSpec:
                 "joint_ranges": dict(robot.joint_ranges),
             },
             "action_scale": self.action_scale,
+            "action_rescale": self.action_rescale,
             "action_clip_value": self.action_clip_value,
             "normalize_action_to": self.normalize_action_to,
             "init_state": self.init_state,
@@ -235,6 +244,7 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
         hydra_overrides=[str(item) for item in training.get("hydra_overrides", [])],
         fb_aux_rewards_scaling=fb_aux_rewards_scaling,
         action_scale=_required_float(control, "action_scale", context="training.control"),
+        action_rescale=_optional_bool(control, "action_rescale", default=True, context="training.control"),
         action_clip_value=_required_float(control, "action_clip_value", context="training.control"),
         normalize_action_to=_required_float(control, "normalize_action_to", context="training.control"),
         init_state={

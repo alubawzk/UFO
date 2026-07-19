@@ -145,8 +145,11 @@ training:
 
   control:
     action_scale: 0.25
-    action_clip_value: 5.0
-    normalize_action_to: 5.0
+    # Match mini3_lab JointPositionActionCfg: q_target = q_default + action * 0.25.
+    # Do not apply the BFM/G1 effort_limit / Kp position-target rescaling.
+    action_rescale: false
+    action_clip_value: 8.0
+    normalize_action_to: 8.0
     effort_limit_scale: 1.0
     # Effort and velocity limits follow mini3/urdf/mini3.urdf, in control_joints order.
     effort_limit: [27.0, 27.0, 27.0, 27.0, 25.0, 25.0, 27.0, 27.0, 27.0, 27.0, 25.0, 25.0, 27.0, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5, 12.5]
