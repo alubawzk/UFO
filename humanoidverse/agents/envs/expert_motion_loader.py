@@ -4,7 +4,7 @@ import torch
 
 from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHistoryHandler
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
-from humanoidverse.utils.reference_observations import reference_base_ang_vel
+from humanoidverse.utils.reference_observations import build_clean_discriminator_state, reference_base_ang_vel
 from humanoidverse.utils.torch_utils import quat_rotate_inverse
 
 from ..buffers.trajectory import TrajectoryDictBuffer
@@ -45,6 +45,14 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         ref_ang_vel = reference_base_ang_vel(env, base_quat, ref_body_angular_vels[:, 0])
         projected_gravity = quat_rotate_inverse(base_quat, env.gravity_vec[0:1].repeat(max_local_self_obs.shape[0], 1), w_last=True)
         bogus_actions = ref_dof_pos * 0
+
+        discriminator_state = build_clean_discriminator_state(
+            ref_dof_pos,
+            ref_dof_vel,
+            projected_gravity,
+            quat_rotate_inverse(base_quat, ref_body_angular_vels[:, 0], w_last=True),
+            env.config.obs.obs_scales,
+        )
 
         state = torch.cat(
             [
@@ -87,6 +95,9 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         truncated[-1] = True
 
         assert state.shape[0] == curr_motion_len, f"{env._motion_lib._motion_data_keys[i]}: {state.shape[0]} vs {curr_motion_len}"
+        assert discriminator_state.shape == state.shape, (
+            f"{env._motion_lib._motion_data_keys[i]}: discriminator state {discriminator_state.shape} vs actor state {state.shape}"
+        )
         assert max_local_self_obs.shape[0] == curr_motion_len, (
             f"{env._motion_lib._motion_data_keys[i]}: {max_local_self_obs.shape[0]} vs {curr_motion_len}"
         )
@@ -102,6 +113,7 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
         ep = {
             "observation": {
                 "state": state,
+                "discriminator_state": discriminator_state,
                 "last_action": bogus_actions,
                 "privileged_state": max_local_self_obs,
             },
@@ -120,6 +132,7 @@ def load_expert_trajectories_from_motion_lib(env, agent_cfg, device="cpu", add_h
     )
 
     assert expert_buffer.storage["observation"]["state"].shape[0] == expert_buffer.storage["truncated"].shape[0]
+    assert expert_buffer.storage["observation"]["discriminator_state"].shape[0] == expert_buffer.storage["truncated"].shape[0]
     assert expert_buffer.storage["observation"]["last_action"].shape[0] == expert_buffer.storage["truncated"].shape[0]
     assert expert_buffer.storage["observation"]["privileged_state"].shape[0] == expert_buffer.storage["truncated"].shape[0]
     assert expert_buffer.storage["terminated"].shape[0] == expert_buffer.storage["truncated"].shape[0]

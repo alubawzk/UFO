@@ -30,6 +30,7 @@ from humanoidverse.envs.env_utils.history_handler import HistoryHandler as HVHis
 from humanoidverse.envs.motion_observations import compute_humanoid_observations_max
 from humanoidverse.utils.helpers import pre_process_config
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
+from humanoidverse.utils.reference_observations import build_clean_discriminator_state
 from humanoidverse.utils.torch_utils import (
     my_quat_rotate,
     quat_from_angle_axis,
@@ -1413,6 +1414,17 @@ class HumanoidVerseMjlabCore:
         self._compute_reference_and_privileged_obs()
         dof_pos_rel = self.dof_pos - (self.default_dof_pos + self.default_dof_pos_offset)
         policy_imu = self._policy_imu_frame()
+        # The discriminator gets a separate clean observation. Use the current
+        # simulator IMU signals (not the noisy/delayed policy IMU) and the
+        # nominal default pose shared with expert data (not the randomized
+        # actuator-zero offset).
+        discriminator_state = build_clean_discriminator_state(
+            self.dof_pos - self.default_dof_pos,
+            self.dof_vel,
+            self.projected_gravity,
+            self.base_ang_vel,
+            self.config.obs.obs_scales,
+        )
         obs_data = {
             "actions": self._apply_obs_scale_noise("actions", self.actions),
             "base_ang_vel": self._apply_obs_scale_noise("base_ang_vel", policy_imu[:, :3]),
@@ -1431,6 +1443,7 @@ class HumanoidVerseMjlabCore:
         history_actor = self._apply_obs_scale_noise("history_actor", history_actor)
         raw = {
             **obs_data,
+            "discriminator_state": discriminator_state,
             "history_actor": history_actor,
         }
         self.obs_buf_dict_raw = {"actor_obs": raw}
@@ -1443,6 +1456,7 @@ class HumanoidVerseMjlabCore:
         raw_obs = self._raw_actor_obs()
         obs = {
             "state": torch.cat([raw_obs["dof_pos"], raw_obs["dof_vel"], raw_obs["projected_gravity"], raw_obs["base_ang_vel"]], dim=-1),
+            "discriminator_state": raw_obs["discriminator_state"],
             "privileged_state": raw_obs["max_local_self"],
         }
         if include_last_action:

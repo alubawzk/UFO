@@ -152,7 +152,7 @@ def build_fb_agent(
                     name="DiscriminatorArchi",
                     hidden_dim=1024,
                     hidden_layers=3,
-                    input_filter=DictInputFilterConfig(name="DictInputFilterConfig", key=["state", "privileged_state"]),
+                    input_filter=DictInputFilterConfig(name="DictInputFilterConfig", key=["discriminator_state", "privileged_state"]),
                 ),
                 aux_critic=ForwardArchiConfig(
                     name="ForwardArchi",
@@ -171,6 +171,7 @@ def build_fb_agent(
                 name="ObsNormalizerConfig",
                 normalizers={
                     "state": BatchNormNormalizerConfig(name="BatchNormNormalizerConfig", momentum=0.01),
+                    "discriminator_state": BatchNormNormalizerConfig(name="BatchNormNormalizerConfig", momentum=0.01),
                     "privileged_state": BatchNormNormalizerConfig(name="BatchNormNormalizerConfig", momentum=0.01),
                     "last_action": BatchNormNormalizerConfig(name="BatchNormNormalizerConfig", momentum=0.01),
                     "history_actor": BatchNormNormalizerConfig(name="BatchNormNormalizerConfig", momentum=0.01),
