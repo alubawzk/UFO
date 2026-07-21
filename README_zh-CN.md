@@ -236,6 +236,26 @@ nohup bash -lc '
     --work-dir runs/ufo_fb_lafan1_mini3_7gpu_ReviseFeetRoll_AddJointParams
 ' > /home/wzk/UFO/ufo_fb_lafan1_mini3_AddJointParams.log 2>&1 &
 
+## Fine-tune
+nohup bash -lc '
+  cd /home/wzk/UFO &&
+  source /root/.local/bin/env &&
+  source .venv/bin/activate &&
+  export PYTHONUNBUFFERED=1 &&
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 ./run_train.sh \
+    --agent fb \
+    --robot-config configs/robots/mini3.yaml \
+    --data-manifest configs/data/lafan1_mini3.yaml \
+    --gpu-ids all \
+    --init-checkpoint runs/Revise_torque_limit \
+    --lr-scale 0.25 \
+    --num-envs 1024 \
+    --num-env-steps 192000000 \
+    --buffer-size 1500000 \
+    --checkpoint-every-steps 3200000 \
+    --work-dir runs/ufo_fb_lafan1_mini3_real_motor_finetune
+' > /home/wzk/UFO/ufo_fb_lafan1_mini3_real_motor_finetune.log 2>&1 &
+
 # 跌倒/爬起动作使用 --cartwheel-aux-safe：关闭非期望接触、脚部姿态、
 # 朝向、打滑和踝关节 roll 惩罚，并减小 action-rate 惩罚；关节位置与力矩限制仍保留。
 
