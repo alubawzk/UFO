@@ -58,7 +58,7 @@ training:
     # Lie down init
     - "env.config.lie_down_init=True"
     - "env.config.lie_down_init_prob=0.3"
-    - "env.config.lie_down_init_height=0.1"
+    - "env.config.lie_down_init_height=0.35"
 
     # Environment reward
     - "rewards.reward_scales.penalty_action_rate=-0.2"
