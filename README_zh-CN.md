@@ -242,13 +242,13 @@ nohup bash -lc '
   source /root/.local/bin/env &&
   source .venv/bin/activate &&
   export PYTHONUNBUFFERED=1 &&
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 ./run_train.sh \
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ./run_train.sh \
     --agent fb \
     --robot-config configs/robots/mini3.yaml \
     --data-manifest configs/data/lafan1_mini3.yaml \
     --gpu-ids all \
     --init-checkpoint runs/Revise_torque_limit \
-    --lr-scale 0.25 \
+    --lr-scale 0.5 \
     --num-envs 1024 \
     --num-env-steps 192000000 \
     --buffer-size 1500000 \
