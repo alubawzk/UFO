@@ -173,10 +173,33 @@ UV_NO_SYNC=1 ./run_train.sh \
 ## 使用转换后的 Mini3 PKL 训练
 ./run_train.sh \
   --agent fb \
+  --robot-config configs/robots/mini3.yaml \
   --data-manifest configs/data/mini3_pkl.yaml \
   --gpu-ids single \
   --work-dir runs/ufo_fb_mini3
 ```
+
+Mini3 的新训练默认启用 `configs/robots/mini3.yaml` 中的 `training.actuator.real_motor`：电机响应状态按 500 Hz
+physics step 更新，policy 仍按 50 Hz 输出目标位置。该模型包含 4340P/4310P T-N 曲线、电流环与一阶响应、KT
+映射和平行踝关节电机空间映射。修改该项只影响新建的训练；已有 checkpoint 不会被追溯修改。如需复现旧的简化 DC
+actuator 基线，可把 `training.actuator.real_motor.enabled` 设为 `false`。
+
+如果要从同一 Mini3/同一 FB 网络结构的简化 DC actuator checkpoint 开始 finetune，使用新的 work-dir，并通过
+`--init-checkpoint` 仅初始化模型权重：
+
+```bash
+./run_train.sh \
+  --agent fb \
+  --robot-config configs/robots/mini3.yaml \
+  --data-manifest configs/data/lafan1_mini3.yaml \
+  --gpu-ids single \
+  --init-checkpoint runs/OLD_DC_RUN \
+  --lr-scale 0.25 \
+  --work-dir runs/ufo_fb_mini3_real_motor_finetune
+```
+
+该模式不会加载旧 optimizer、旧 replay buffer 或旧训练步数。`--init-checkpoint` 可指向旧 run 目录、`checkpoint`
+目录、`model` 目录或 `model.safetensors` 文件；目标 `--work-dir` 必须是新的、没有可恢复 checkpoint 的目录。
 
 
 ### 4. FB 训练
@@ -285,9 +308,10 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference 
   --tn-limit-after-response true
 ```
 
-纯 MuJoCo 推理默认启用与 `mini3_lab/sim2sim_mini3_bm.py` 一致的 Mini3 电机侧模型：4340P/4310P T-N 曲线、PI
-电流环与一阶力矩响应、1 个 500 Hz physics step 的响应延迟、KT 标定查表，以及平行踝关节的 `J/J.T` 力矩映射。可用
-`--enable-real-motor false` 恢复为训练环境使用的 MJLab 简化 DC 电机限幅，以便做对照实验。
+纯 MuJoCo 推理默认启用与 Mini3 新训练相同的电机侧模型；参数来自
+`mini3_lab/sim2sim_mini3_bm.py`：4340P/4310P T-N 曲线、PI 电流环与一阶力矩响应、1 个 500 Hz physics step
+的响应延迟、KT 标定查表，以及平行踝关节的 `J/J.T` 力矩映射。`--enable-real-motor false` 仅用于旧 checkpoint
+或简化 DC actuator 对照实验，其动力学与启用 real motor 的新训练不一致。
 
 普通 tracking inference 输出到 `<model-folder>/tracking_inference/`；纯 MuJoCo 程序会把生成的 `z` 写到
 `<model-folder>/mujoco_tracking_inference/`。

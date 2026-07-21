@@ -249,14 +249,26 @@ class RobotConfigTrainingTest(unittest.TestCase):
     def test_mini3_actuator_dynamics_reach_mjlab_cfg(self) -> None:
         training = load_robot_training_spec("configs/robots/mini3.yaml")
         _, mjlab_config = _make_mini3_mjlab_cfg(disable_domain_randomization=True)
-        actuators = {actuator.target_names_expr[0]: actuator for actuator in mjlab_config.scene.entities["robot"].articulation.actuators}
+        actuators = mjlab_config.scene.entities["robot"].articulation.actuators
+
+        self.assertEqual(len(actuators), 3)
+        self.assertEqual(
+            [type(actuator).__name__ for actuator in actuators],
+            ["Mini3RealMotorActuatorCfg", "Mini3RealMotorActuatorCfg", "Mini3ParallelAnkleRealMotorActuatorCfg"],
+        )
+        self.assertTrue(training.actuator["real_motor"]["enabled"])
+        self.assertTrue(training.actuator["real_motor"]["tn_torque_limit_enabled"])
+        self.assertTrue(training.actuator["real_motor"]["torque_response_enabled"])
+        self.assertTrue(training.actuator["real_motor"]["kt_output_model_enabled"])
 
         for joint_name in training.robot.control_joint_names:
             expected = training.actuator["joints"][joint_name]
-            actuator = actuators[joint_name]
+            actuator = next(actuator for actuator in actuators if joint_name in actuator.target_names_expr)
             self.assertEqual(actuator.armature, expected["armature"])
             self.assertEqual(actuator.frictionloss, expected["friction"])
             self.assertEqual(actuator.viscous_damping, expected["viscous_friction"])
+            self.assertEqual(actuator.stiffness_by_joint[joint_name], training.stiffness[joint_name])
+            self.assertEqual(actuator.damping_by_joint[joint_name], training.damping[joint_name])
 
         action_cfg = mjlab_config.actions["actions"]
         self.assertEqual(set(action_cfg.scale), set(training.robot.control_joint_names))

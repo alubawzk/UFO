@@ -118,6 +118,8 @@ class TrainConfig(BaseConfig):
     # Note: this is in env steps (multiples of online_parallel_envs)
     checkpoint_every_steps: int = 5_000_000
     checkpoint_buffer: bool = True
+    init_checkpoint: str | None = None
+    """Initialize model weights from another run while resetting optimizer, replay, and counters."""
     prioritization: bool = False
     prioritization_min_val: float = 0.5
     prioritization_max_val: float = 5
@@ -200,9 +202,62 @@ class TrainConfig(BaseConfig):
         return Workspace(self)
 
 
+def _resolve_init_checkpoint_model_path(path: str | Path) -> Path:
+    """Resolve a run/checkpoint/model path to a model.safetensors file."""
+
+    source = Path(path).expanduser().resolve()
+    candidates = (
+        [source]
+        if source.is_file()
+        else [
+            source / "model" / "model.safetensors",
+            source / "checkpoint" / "model" / "model.safetensors",
+            source / "model.safetensors",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    checked = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"Could not find model.safetensors for init checkpoint {source}. Checked: {checked}")
+
+
+def _initialize_agent_model(agent: tp.Any, init_checkpoint: str | Path, device: str) -> Path:
+    """Load only model weights, leaving newly built optimizer/runtime state untouched."""
+
+    import safetensors.torch
+
+    model_path = _resolve_init_checkpoint_model_path(init_checkpoint)
+    try:
+        missing, unexpected = safetensors.torch.load_model(
+            agent._model,
+            str(model_path),
+            strict=True,
+            device=device,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to initialize model weights from {model_path}. "
+            "The source checkpoint must use the same agent, robot, observation dimensions, and action dimensions."
+        ) from exc
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Init checkpoint model keys do not match the current model: missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
+    print(
+        f"Initialized model weights from {model_path}; optimizer, replay buffer, and training counters start fresh",
+        flush=True,
+    )
+    return model_path
+
+
 def create_agent_or_load_checkpoint(work_dir: Path, cfg: TrainConfig, agent_build_kwargs: dict[str, tp.Any]):
     checkpoint_dir = work_dir / CHECKPOINT_DIR_NAME
     train_status_path = checkpoint_dir / "train_status.json"
+    if train_status_path.exists() and cfg.init_checkpoint is not None:
+        raise ValueError(
+            "init_checkpoint can only be used with a fresh work_dir; the selected work_dir already contains a resumable checkpoint"
+        )
     checkpoint_status = _initial_train_status(cfg)
     if train_status_path.exists():
         with train_status_path.open("r") as f:
@@ -216,6 +271,9 @@ def create_agent_or_load_checkpoint(work_dir: Path, cfg: TrainConfig, agent_buil
         agent = cfg.agent.object_class.load(checkpoint_dir, device=cfg.agent.model.device)
     else:
         agent = cfg.agent.build(**agent_build_kwargs)
+        load_init_weights_on_this_rank = not cfg.distributed_sync or int(cfg.distributed_rank) == 0
+        if cfg.init_checkpoint is not None and load_init_weights_on_this_rank:
+            _initialize_agent_model(agent, cfg.init_checkpoint, cfg.agent.model.device)
     return agent, cfg, checkpoint_status
 
 

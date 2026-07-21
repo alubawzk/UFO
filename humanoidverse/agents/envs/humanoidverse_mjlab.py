@@ -342,8 +342,10 @@ def _nonnegative_int_range(value, name: str) -> tuple[int, int]:
 
 
 def _randomize_dc_motor_strength(env, env_ids, strength_range: tuple[float, float], asset_cfg) -> None:
-    """Scale DC motor continuous and peak torque from their nominal values."""
+    """Scale DC/real-motor torque capacity from nominal values."""
     from mjlab.actuator import DcMotorActuator
+
+    from humanoidverse.agents.envs.mini3_real_motor_actuator import Mini3RealMotorActuator
 
     asset = env.scene[asset_cfg.name]
     if env_ids is None:
@@ -360,8 +362,13 @@ def _randomize_dc_motor_strength(env, env_ids, strength_range: tuple[float, floa
         actuators = [asset.actuators[actuator_ids]]
 
     for actuator in actuators:
+        if isinstance(actuator, Mini3RealMotorActuator):
+            sample_shape = (env_ids.numel(), len(actuator.target_names))
+            scales = torch.empty(sample_shape, device=env.device).uniform_(*strength_range)
+            actuator.set_motor_strength(env_ids, scales)
+            continue
         if not isinstance(actuator, DcMotorActuator):
-            raise TypeError(f"Motor strength randomization requires DcMotorActuator, got {type(actuator).__name__}")
+            raise TypeError(f"Motor strength randomization requires a DC/real-motor actuator, got {type(actuator).__name__}")
         assert actuator.default_force_limit is not None
         assert actuator.force_limit is not None
         assert actuator.saturation_effort is not None
@@ -709,6 +716,11 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.sim import MujocoCfg, SimulationCfg
     from mjlab.terrains import TerrainEntityCfg
 
+    from humanoidverse.agents.envs.mini3_real_motor_actuator import (
+        Mini3ParallelAnkleRealMotorActuatorCfg,
+        Mini3RealMotorActuatorCfg,
+    )
+
     class SimulationStepDelayedJointPositionAction(JointPositionAction):
         """Joint-position action whose FIFO advances on every physics step."""
 
@@ -781,26 +793,97 @@ def make_mjlab_ufo_env_cfg(
     friction = actuator_params["friction"]
     viscous_friction = actuator_params.get("viscous_friction", [None] * len(dof_names))
 
+    real_motor = dict((robot_training.get("actuator") or {}).get("real_motor") or {})
+    real_motor_enabled = bool(real_motor.get("enabled", False))
     actuators = []
+    if real_motor_enabled:
+        ankle_names = tuple(name for name in dof_names if "_ankle_" in name)
+        pace_names = tuple(name for name in dof_names if any(token in name for token in ("_hip_", "_knee_", "waist_")))
+        arm_names = tuple(name for name in dof_names if any(token in name for token in ("_shoulder_", "_elbow_")))
+        grouped_names = (*pace_names, *ankle_names, *arm_names)
+        if len(grouped_names) != len(dof_names) or set(grouped_names) != set(dof_names):
+            raise ValueError(f"Mini3 real-motor grouping does not cover the control joints exactly: {grouped_names}")
+        if len(ankle_names) != 4:
+            raise ValueError(f"Mini3 real-motor model requires four ankle joints, got {ankle_names}")
+
+        index_by_name = {name: index for index, name in enumerate(dof_names)}
+
+        def uniform_group_value(names: tuple[str, ...], values: list[float | None], field: str) -> float | None:
+            selected = [values[index_by_name[name]] for name in names]
+            first = selected[0]
+            if any(value != first for value in selected[1:]):
+                raise ValueError(f"Mini3 real-motor group {names} has non-uniform {field}: {selected}")
+            return first
+
+        response_kwargs = {
+            "torque_response_enabled": bool(real_motor.get("torque_response_enabled", True)),
+            "torque_response_kp": float(real_motor.get("torque_response_kp", 0.0)),
+            "torque_response_ki": float(real_motor.get("torque_response_ki", 90.6769527429)),
+            "torque_response_plant_tau_s": float(real_motor.get("torque_response_plant_tau_s", 0.00393417593548)),
+            "torque_response_delay_steps": float(real_motor.get("torque_response_delay_steps", 1.0)),
+            "tn_torque_limit_enabled": bool(real_motor.get("tn_torque_limit_enabled", True)),
+            "tn_limit_after_response": bool(real_motor.get("tn_limit_after_response", True)),
+            "kt_output_model_enabled": bool(real_motor.get("kt_output_model_enabled", True)),
+        }
+
+        def gains_for(names: tuple[str, ...], values: dict[str, float]) -> dict[str, float]:
+            return {name: _match_joint_value(name, values) for name in names}
+
+        for names, motor_type in ((pace_names, "4340p"), (arm_names, "4310p")):
+            actuators.append(
+                Mini3RealMotorActuatorCfg(
+                    target_names_expr=names,
+                    stiffness=0.0,
+                    damping=0.0,
+                    stiffness_by_joint=gains_for(names, stiffness),
+                    damping_by_joint=gains_for(names, damping),
+                    effort_limit=float(uniform_group_value(names, effort_limits, "effort_limit")),
+                    armature=uniform_group_value(names, armature, "armature"),
+                    frictionloss=uniform_group_value(names, friction, "friction"),
+                    viscous_damping=uniform_group_value(names, viscous_friction, "viscous_friction"),
+                    motor_type=motor_type,
+                    **response_kwargs,
+                )
+            )
+        actuators.append(
+            Mini3ParallelAnkleRealMotorActuatorCfg(
+                target_names_expr=ankle_names,
+                stiffness=0.0,
+                damping=0.0,
+                stiffness_by_joint=gains_for(ankle_names, stiffness),
+                damping_by_joint=gains_for(ankle_names, damping),
+                # Motor-space limits are applied before J.T; a joint-side
+                # actuator force range would incorrectly clip the result again.
+                effort_limit=float("inf"),
+                armature=uniform_group_value(ankle_names, armature, "armature"),
+                frictionloss=uniform_group_value(ankle_names, friction, "friction"),
+                viscous_damping=uniform_group_value(ankle_names, viscous_friction, "viscous_friction"),
+                motor_type="4310p",
+                ankle_motor_torque_limit=float(real_motor.get("ankle_motor_torque_limit", 12.5)),
+                **response_kwargs,
+            )
+        )
+        actuator_source = f"{actuator_source}+mini3_real_motor"
+    else:
+        for i, joint_name in enumerate(dof_names):
+            effort_limit = effort_limits[i]
+            actuators.append(
+                DcMotorActuatorCfg(
+                    target_names_expr=(joint_name,),
+                    stiffness=_match_joint_value(joint_name, stiffness),
+                    damping=_match_joint_value(joint_name, damping),
+                    effort_limit=effort_limit,
+                    saturation_effort=effort_limit,
+                    velocity_limit=velocity_limits[i],
+                    armature=armature[i] if i < len(armature) else None,
+                    frictionloss=friction[i] if i < len(friction) else None,
+                    viscous_damping=viscous_friction[i] if i < len(viscous_friction) else None,
+                )
+            )
+
     action_scale = {}
     for i, joint_name in enumerate(dof_names):
         kp = _match_joint_value(joint_name, stiffness)
-        kd = _match_joint_value(joint_name, damping)
-        effort_limit = effort_limits[i]
-        actuators.append(
-            DcMotorActuatorCfg(
-                target_names_expr=(joint_name,),
-                stiffness=kp,
-                damping=kd,
-                effort_limit=effort_limit,
-                saturation_effort=effort_limit,
-                velocity_limit=velocity_limits[i],
-                armature=armature[i] if i < len(armature) else None,
-                frictionloss=friction[i] if i < len(friction) else None,
-                viscous_damping=viscous_friction[i] if i < len(viscous_friction) else None,
-            )
-        )
-
         scale = float(config.robot.control.action_scale)
         if bool(config.robot.control.action_rescale):
             if kp <= 0.0:
@@ -808,7 +891,7 @@ def make_mjlab_ufo_env_cfg(
             scale *= bfm_effort_limits[i] / kp
         action_scale[joint_name] = scale
 
-    if len(actuators) != len(dof_names):
+    if not real_motor_enabled and len(actuators) != len(dof_names):
         raise ValueError(f"Expected one MJLab actuator per UFO dof, got {len(actuators)} for {len(dof_names)} dofs")
     scaled_effort_limits = [float(x) * effort_scale for x in bfm_effort_limits]
     if effort_scale != 1.0 and any(abs(a - b) < 1.0e-6 for a, b in zip(effort_limits, scaled_effort_limits)):
@@ -823,7 +906,8 @@ def make_mjlab_ufo_env_cfg(
         f"kd={[_match_joint_value(name, damping) for name in dof_names]}, "
         f"effort_limit={effort_limits}, velocity_limit={velocity_limits}, "
         f"armature={armature}, friction={friction}, viscous_friction={viscous_friction}, "
-        f"dof_effort_limit_scale={effort_scale} ignored_for_mjlab_actuator_limits",
+        f"dof_effort_limit_scale={effort_scale} ignored_for_mjlab_actuator_limits, "
+        f"real_motor={real_motor if real_motor_enabled else False}",
         flush=True,
     )
 

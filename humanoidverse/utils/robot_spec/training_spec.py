@@ -214,6 +214,33 @@ def load_robot_training_spec(config_path: str | Path) -> RobotTrainingSpec:
             if viscous_friction is not None:
                 float(viscous_friction)
 
+    raw_real_motor = actuator.get("real_motor", {})
+    if not isinstance(raw_real_motor, dict):
+        raise ValueError("training.actuator.real_motor must be a mapping")
+    if bool(raw_real_motor.get("enabled", False)):
+        if actuator_source != "yaml":
+            raise ValueError("training.actuator.real_motor requires training.actuator.source=yaml")
+        for key in (
+            "torque_response_enabled",
+            "tn_torque_limit_enabled",
+            "tn_limit_after_response",
+            "kt_output_model_enabled",
+        ):
+            value = raw_real_motor.get(key, True)
+            if not isinstance(value, bool):
+                raise ValueError(f"training.actuator.real_motor.{key} must be boolean")
+        response_kp = float(raw_real_motor.get("torque_response_kp", 0.0))
+        response_ki = float(raw_real_motor.get("torque_response_ki", 90.6769527429))
+        response_tau = float(raw_real_motor.get("torque_response_plant_tau_s", 0.00393417593548))
+        response_delay = float(raw_real_motor.get("torque_response_delay_steps", 1.0))
+        ankle_limit = float(raw_real_motor.get("ankle_motor_torque_limit", 12.5))
+        if not all(math.isfinite(value) for value in (response_kp, response_ki, response_tau, response_delay, ankle_limit)):
+            raise ValueError("training.actuator.real_motor numeric parameters must be finite")
+        if response_kp < 0.0 or response_ki < 0.0:
+            raise ValueError("training.actuator.real_motor torque-response gains must be nonnegative")
+        if response_tau <= 0.0 or ankle_limit <= 0.0 or response_delay < 0.0:
+            raise ValueError("training.actuator.real_motor requires positive tau/ankle limit and nonnegative delay")
+
     if imu_delay:
         time_range = imu_delay.get("time_range_s")
         if not isinstance(time_range, list) or len(time_range) != 2:

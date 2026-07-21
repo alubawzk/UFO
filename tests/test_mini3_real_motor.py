@@ -4,9 +4,16 @@ import math
 import unittest
 
 import numpy as np
+import torch
 
+from humanoidverse.agents.envs.mini3_real_motor_actuator import (
+    Mini3ParallelAnkleRealMotorActuator,
+    Mini3RealMotorActuator,
+    _PhysicsStepTorqueDelay,
+)
 from humanoidverse.utils.mini3_real_motor import (
     ANKLE_JOINT_NAMES,
+    ANKLE_PARAMS,
     KT_OUTPUT_TABLES,
     MOTOR_SPECS,
     Mini3ParallelAnkle,
@@ -14,6 +21,7 @@ from humanoidverse.utils.mini3_real_motor import (
     MotorKtOutputModel,
     MotorTnLimit,
     TorqueCurrentLoopResponse,
+    ankle_ik,
 )
 
 MINI3_JOINT_NAMES = (
@@ -106,6 +114,43 @@ class Mini3RealMotorTest(unittest.TestCase):
         self.assertGreater(output[0], 0.0)
         self.assertLess(output[0], 20.0)
         np.testing.assert_allclose(output[[MINI3_JOINT_NAMES.index(name) for name in ANKLE_JOINT_NAMES]], 0.0)
+
+    def test_training_response_delay_resets_environments_independently(self) -> None:
+        delay = _PhysicsStepTorqueDelay(num_envs=2, num_channels=1, delay_steps=1.0, device="cpu")
+        torch.testing.assert_close(delay.append_and_read(torch.tensor([[1.0], [10.0]])), torch.tensor([[1.0], [10.0]]))
+        torch.testing.assert_close(delay.append_and_read(torch.tensor([[2.0], [20.0]])), torch.tensor([[1.0], [10.0]]))
+        delay.reset(torch.tensor([0]))
+        torch.testing.assert_close(delay.append_and_read(torch.tensor([[3.0], [30.0]])), torch.tensor([[3.0], [20.0]]))
+
+    def test_training_tn_and_kt_match_pure_mujoco_models(self) -> None:
+        actuator = object.__new__(Mini3RealMotorActuator)
+        actuator.motor_type = "4340p"
+        actuator.motor_strength = torch.ones(1, 3)
+        table = KT_OUTPUT_TABLES["4340p"]
+        actuator.kt_feedback = torch.tensor((0.0, *table["feedback_tau_nm"]))
+        actuator.kt_actual = torch.tensor((0.0, *table["actual_tau_nm"]))
+        torque = torch.tensor([[30.0, 20.0, -20.0]])
+        velocity = torch.tensor([[0.0, math.pi, -math.pi]])
+        training_tn = actuator._tn_clip(torque, velocity).numpy()
+        pure_tn = MotorTnLimit(name="4340p", **MOTOR_SPECS["4340p"]).clip(torque.numpy(), velocity.numpy())
+        np.testing.assert_allclose(training_tn, pure_tn, rtol=1.0e-6, atol=1.0e-6)
+        np.testing.assert_allclose(
+            actuator._kt_map(torch.from_numpy(pure_tn)).numpy(),
+            MotorKtOutputModel(name="4340p", **table).map(pure_tn),
+            rtol=1.0e-6,
+            atol=1.0e-6,
+        )
+
+    def test_training_parallel_ankle_ik_matches_pure_mujoco(self) -> None:
+        p = ANKLE_PARAMS
+        args = (p["d"], p["df"], p["zl"] + p["z0"], p["zr"] + p["z0"], p["l"], p["lm"], p["hl"], p["hr"], p["z0"])
+        roll = torch.tensor([0.0, 0.1], dtype=torch.float64)
+        pitch = torch.tensor([0.0, -0.08], dtype=torch.float64)
+        training_tmr, training_tml, valid = Mini3ParallelAnkleRealMotorActuator._ankle_ik(args, roll, pitch)
+        self.assertTrue(torch.all(valid))
+        expected = np.asarray([ankle_ik(*args, float(r), float(q)) for r, q in zip(roll, pitch)])
+        np.testing.assert_allclose(training_tmr.numpy(), expected[:, 0], rtol=0.0, atol=1.0e-10)
+        np.testing.assert_allclose(training_tml.numpy(), expected[:, 1], rtol=0.0, atol=1.0e-10)
 
 
 if __name__ == "__main__":

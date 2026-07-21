@@ -204,6 +204,22 @@ training:
   # friction is Coulomb frictionloss; viscous_friction maps to MuJoCo joint damping.
   actuator:
     source: yaml
+    # Calibrated Mini3 motor model shared by MJLab training and pure MuJoCo
+    # sim2sim. Response state advances at the 500 Hz physics rate.
+    real_motor:
+      enabled: true
+      torque_response_enabled: true
+      torque_response_kp: 0.0
+      torque_response_ki: 90.6769527429
+      torque_response_plant_tau_s: 0.00393417593548
+      torque_response_delay_steps: 1.0
+      tn_torque_limit_enabled: true
+      tn_limit_after_response: true
+      kt_output_model_enabled: true
+      ankle_motor_torque_limit: 12.5
+      # Constants and KT tables mirror mini3_lab's sim2sim_mini3_bm.py:
+      # 4340P 9/27 Nm, 36/60 rpm; 4310P 3.5/12.5 Nm, 120/450 rpm.
+      parameter_source: mini3_lab_sim2sim_mini3_bm
     # These are 500 Hz physics-step delays. Pace uses a fixed four-step
     # position-target delay; Isaac Lab samples one shared delay per ankle
     # actuator group and environment; implicit arm actuators have no delay.

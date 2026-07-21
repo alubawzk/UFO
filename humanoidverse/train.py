@@ -97,6 +97,7 @@ def build_ufo_mjlab_config(
     use_wandb: bool,
     wandb_run_name: str | None,
     checkpoint_every_steps: int = 9600000,
+    init_checkpoint: str | Path | None = None,
     distributed_rank: int = 0,
     distributed_world_size: int = 1,
     disable_eval_prioritization: bool = False,
@@ -221,6 +222,7 @@ def build_ufo_mjlab_config(
         num_agent_updates=train_runtime["num_agent_updates"],
         checkpoint_every_steps=checkpoint_every_steps,
         checkpoint_buffer=train_runtime["checkpoint_buffer"],
+        init_checkpoint=str(Path(init_checkpoint).expanduser().resolve()) if init_checkpoint is not None else None,
         prioritization=run_eval_and_prioritization,
         prioritization_min_val=0.5,
         prioritization_max_val=2.0,
@@ -304,6 +306,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         use_wandb=bool(args.use_wandb and rank == 0),
         wandb_run_name=args.wandb_run_name,
         checkpoint_every_steps=args.checkpoint_every_steps,
+        init_checkpoint=args.init_checkpoint,
         distributed_rank=rank,
         distributed_world_size=world_size,
         disable_eval_prioritization=bool(args.disable_eval_prioritization),
@@ -329,6 +332,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
+        f"init_checkpoint={cfg.init_checkpoint}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"compile={cfg.agent.compile}, "
@@ -424,6 +428,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=DEFAULT_NUM_ENVS)
     parser.add_argument("--num-env-steps", type=int, default=DEFAULT_NUM_ENV_STEPS)
     parser.add_argument("--checkpoint-every-steps", type=int, default=DEFAULT_CHECKPOINT_EVERY_STEPS)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Initialize model weights from an existing run, checkpoint directory, model directory, or model.safetensors file. "
+            "Requires a fresh --work-dir; optimizer state, replay buffer, and training counters are reset."
+        ),
+    )
     parser.add_argument(
         "--data-path",
         nargs="+",

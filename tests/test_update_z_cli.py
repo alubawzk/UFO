@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -48,6 +49,22 @@ class UpdateZCliTest(unittest.TestCase):
             agent="tldr",
         )
         self.assertEqual(cfg.agent.train.update_z_every_step, 10)
+
+    def test_init_checkpoint_cli_reaches_train_config(self) -> None:
+        args = self._parse("--init-checkpoint", "runs/old_dc")
+        self.assertEqual(args.init_checkpoint, Path("runs/old_dc"))
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_init_checkpoint_test",
+            num_envs=1,
+            num_env_steps=1,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            init_checkpoint=args.init_checkpoint,
+        )
+        self.assertEqual(cfg.init_checkpoint, str(Path("runs/old_dc").resolve()))
 
     def test_tldr_trajectory_buffer_keeps_aux_rewards(self) -> None:
         selected = build_agent_preset(
