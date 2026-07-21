@@ -160,7 +160,7 @@ UV_NO_SYNC=1 ./run_train.sh \
 
 ## 直接播放 flat PKL（直接读取 root_rot，不从欧拉角重建）
 .venv/bin/python -m humanoidverse.tools.play_mini3_pkl \
-  --pkl humanoidverse/data/lafan1_mini3/dance1_subject2.pkl
+  --pkl /home/amax/Desktop/robot/UFO/humanoidverse/data/pkl/230323/stairs_climbing_down_loop_R_104__A301.pkl
 
 ## 直接把 flat PKL 转成训练格式（不经过 CSV/NPZ）
 # root_rot 按 xyzw 直接读取；输出为 MotionLib 可惰性加载的约 10 秒 UFO PKL。
@@ -254,9 +254,43 @@ uv run python -m humanoidverse.tracking_inference \
   --headless \
   --save-mp4 \
   --motion-list 0
+
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.tracking_inference   --model-folder runs/Revise_torque_limit   --data-path humanoidverse/data/lafan1_mini3_ufo/walk4_subject1__clip008.pkl   --robot-config configs/robots/mini3.yaml   --device cuda:0   --headless   --save-mp4   --motion-list 0   --export-onnx true
+
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.tracking_inference \
+  --model-folder runs/Revise_torque_limit \
+  --data-path humanoidverse/data/lafan1_mini3_ufo/dance2_subject4__clip013.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless false \
+  --save-mp4 false \
+  --motion-list 0 \
+  --disable-dr \
+  --disable-obs-noise \
+  --export-onnx false \
+  --fps 50
+
+## mujoco test
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/Revise_torque_limit \
+  --data-path humanoidverse/data/lafan1_mini3_ufo/walk1_subject2__clip002.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless false \
+  --loop true \
+  --enable-real-motor true \
+  --enable-tn-torque-limit true \
+  --enable-torque-response true \
+  --enable-kt-output-model true \
+  --tn-limit-after-response true
 ```
 
-输出会写到 `<model-folder>/tracking_inference/`。
+纯 MuJoCo 推理默认启用与 `mini3_lab/sim2sim_mini3_bm.py` 一致的 Mini3 电机侧模型：4340P/4310P T-N 曲线、PI
+电流环与一阶力矩响应、1 个 500 Hz physics step 的响应延迟、KT 标定查表，以及平行踝关节的 `J/J.T` 力矩映射。可用
+`--enable-real-motor false` 恢复为训练环境使用的 MJLab 简化 DC 电机限幅，以便做对照实验。
+
+普通 tracking inference 输出到 `<model-folder>/tracking_inference/`；纯 MuJoCo 程序会把生成的 `z` 写到
+`<model-folder>/mujoco_tracking_inference/`。
 
 ### 7. ONNX 导出说明
 

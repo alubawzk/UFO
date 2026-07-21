@@ -618,8 +618,6 @@ class MotionLibBase():
         else:
             smpl_data_list = None
         torch.set_num_threads(1)
-        manager = mp.Manager()
-        queue = manager.Queue()
         num_jobs = min(mp.cpu_count(), 8)
         
         if num_jobs <= 16 or not self.multi_thread:
@@ -631,16 +629,25 @@ class MotionLibBase():
 
         jobs = [(ids[i:i + chunk], jobs[i:i + chunk], smpl_data_list, self.fix_height, target_heading, max_len) for i in range(0, len(jobs), chunk)]
         job_args = [jobs[i] for i in range(len(jobs))]
-        for i in range(1, len(jobs)):
-            worker_args = (*job_args[i], queue, i)
-            worker = mp.Process(target=self.load_motion_with_skeleton, args=worker_args)
-            worker.start()
-        res_acc.update(self.load_motion_with_skeleton(*jobs[0], None, 0))
-        
-        
-        for i in track(range(len(jobs) - 1), "Gathering results..."):
-            res = queue.get()
-            res_acc.update(res)
+        if len(jobs) == 1:
+            res_acc.update(self.load_motion_with_skeleton(*jobs[0], None, 0))
+        else:
+            manager = mp.Manager()
+            queue = manager.Queue()
+            workers = []
+            for i in range(1, len(jobs)):
+                worker_args = (*job_args[i], queue, i)
+                worker = mp.Process(target=self.load_motion_with_skeleton, args=worker_args)
+                worker.start()
+                workers.append(worker)
+            res_acc.update(self.load_motion_with_skeleton(*jobs[0], None, 0))
+
+            for _ in track(range(len(jobs) - 1), "Gathering results..."):
+                res = queue.get()
+                res_acc.update(res)
+            for worker in workers:
+                worker.join()
+            manager.shutdown()
 
         
         for f in track(range(len(res_acc)), description="Processing motions..."):

@@ -323,6 +323,23 @@ class RobotConfigTrainingTest(unittest.TestCase):
             args = parse_tracking_args()
         self.assertTrue(str(args.robot_config).endswith("configs/robots/g1_29dof.yaml"))
 
+    def test_tracking_headless_false_enables_interactive_mode(self) -> None:
+        argv = [
+            "tracking_inference.py",
+            "--model-folder",
+            "/tmp/ufo_unit_model",
+            "--headless",
+            "false",
+            "--save-mp4",
+            "false",
+            "--export-onnx",
+            "false",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = parse_tracking_args()
+        self.assertFalse(args.headless)
+        self.assertFalse(args.save_mp4)
+
     def test_tracking_cli_manifest_robot_config_mismatch_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tiny_robot = _write_tiny_robot_with_training(Path(tmpdir))

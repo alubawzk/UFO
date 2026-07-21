@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -25,8 +26,8 @@ import torch
 
 import humanoidverse
 from humanoidverse.agents.envs.humanoidverse_mjlab import (
-    HumanoidVerseMjlabConfig,
     G1_MJLAB_MJCF_PATH,
+    HumanoidVerseMjlabConfig,
 )
 from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
 from humanoidverse.utils.robot_spec import (
@@ -34,7 +35,6 @@ from humanoidverse.utils.robot_spec import (
     load_robot_training_spec,
     resolve_robot_config_path,
 )
-
 
 if getattr(humanoidverse, "__file__", None) is not None:
     HUMANOIDVERSE_DIR = Path(humanoidverse.__file__).parent
@@ -243,14 +243,10 @@ def write_mjlab_relabel_xml(
 
     model = mujoco.MjModel.from_xml_path(str(output_path))
     if int(model.nu) != len(control_joint_names):
-        raise RuntimeError(
-            f"Expected relabel XML ctrl dim {len(control_joint_names)}, got model.nu={model.nu}: {output_path}"
-        )
+        raise RuntimeError(f"Expected relabel XML ctrl dim {len(control_joint_names)}, got model.nu={model.nu}: {output_path}")
     data = mujoco.MjData(model)
     if int(data.ctrl.size) != len(control_joint_names):
-        raise RuntimeError(
-            f"Expected relabel XML data.ctrl dim {len(control_joint_names)}, got {data.ctrl.size}: {output_path}"
-        )
+        raise RuntimeError(f"Expected relabel XML data.ctrl dim {len(control_joint_names)}, got {data.ctrl.size}: {output_path}")
     return output_path
 
 
@@ -421,8 +417,33 @@ def to_rgb_uint8(frame: Any) -> np.ndarray:
     return np.ascontiguousarray(array.astype(np.uint8))
 
 
+def _build_qpos_visualization_model(xml_path: Path, *, expected_qpos_size: int | None = None) -> mujoco.MjModel:
+    spec = mujoco.MjSpec.from_file(str(xml_path))
+    spec.worldbody.add_geom(
+        name="inference_floor",
+        type=mujoco.mjtGeom.mjGEOM_PLANE,
+        pos=[0.0, 0.0, 0.0],
+        size=[20.0, 20.0, 0.02],
+        rgba=[0.45, 0.47, 0.50, 1.0],
+        contype=0,
+        conaffinity=0,
+    )
+    spec.worldbody.add_light(
+        name="inference_key_light",
+        pos=[0.0, -3.0, 4.0],
+        dir=[0.2, 0.5, -1.0],
+        diffuse=[0.8, 0.8, 0.8],
+        ambient=[0.35, 0.35, 0.35],
+        specular=[0.1, 0.1, 0.1],
+    )
+    model = spec.compile()
+    if expected_qpos_size is not None and model.nq != int(expected_qpos_size):
+        raise ValueError(f"Expected visualization model nq={expected_qpos_size}, got nq={model.nq}")
+    return model
+
+
 class MujocoQposRenderer:
-    """Pure MuJoCo renderer for qpos playback from an MJCF."""
+    """Pure MuJoCo offscreen renderer for qpos playback from an MJCF."""
 
     def __init__(
         self,
@@ -434,25 +455,7 @@ class MujocoQposRenderer:
         camera_elevation: float = -18.0,
         expected_qpos_size: int | None = None,
     ):
-        spec = mujoco.MjSpec.from_file(str(xml_path))
-        spec.worldbody.add_geom(
-            name="inference_floor",
-            type=mujoco.mjtGeom.mjGEOM_PLANE,
-            pos=[0.0, 0.0, 0.0],
-            size=[20.0, 20.0, 0.02],
-            rgba=[0.45, 0.47, 0.50, 1.0],
-            contype=0,
-            conaffinity=0,
-        )
-        spec.worldbody.add_light(
-            name="inference_key_light",
-            pos=[0.0, -3.0, 4.0],
-            dir=[0.2, 0.5, -1.0],
-            diffuse=[0.8, 0.8, 0.8],
-            ambient=[0.35, 0.35, 0.35],
-            specular=[0.1, 0.1, 0.1],
-        )
-        self.model = spec.compile()
+        self.model = _build_qpos_visualization_model(xml_path, expected_qpos_size=expected_qpos_size)
         self.model.vis.global_.offwidth = max(int(self.model.vis.global_.offwidth), int(render_size))
         self.model.vis.global_.offheight = max(int(self.model.vis.global_.offheight), int(render_size))
         self.data = mujoco.MjData(self.model)
@@ -462,8 +465,6 @@ class MujocoQposRenderer:
         self.camera.distance = float(camera_distance)
         self.camera.azimuth = float(camera_azimuth)
         self.camera.elevation = float(camera_elevation)
-        if expected_qpos_size is not None and self.model.nq != int(expected_qpos_size):
-            raise ValueError(f"Expected renderer nq={expected_qpos_size}, got nq={self.model.nq}")
 
     def render_qpos(self, qpos: np.ndarray) -> np.ndarray:
         qpos = np.asarray(qpos, dtype=np.float64).reshape(-1)
@@ -478,6 +479,77 @@ class MujocoQposRenderer:
 
     def close(self) -> None:
         self.renderer.close()
+
+
+class MujocoQposViewer:
+    """Interactive passive MuJoCo viewer driven by qpos from the MJLab rollout."""
+
+    def __init__(
+        self,
+        xml_path: Path,
+        *,
+        camera_distance: float = 3.0,
+        camera_azimuth: float = 135.0,
+        camera_elevation: float = -18.0,
+        expected_qpos_size: int | None = None,
+    ):
+        # Import lazily so headless inference does not initialize GLFW.
+        import mujoco.viewer
+
+        self.model = _build_qpos_visualization_model(xml_path, expected_qpos_size=expected_qpos_size)
+        self.data = mujoco.MjData(self.model)
+        self.paused = False
+        self.follow_root = True
+        self.quit_requested = False
+
+        def key_callback(keycode: int) -> None:
+            if keycode == 32:  # Space
+                self.paused = not self.paused
+                print(f"[viewer] {'paused' if self.paused else 'running'}", flush=True)
+            elif keycode in (70, 102):  # F/f
+                self.follow_root = not self.follow_root
+                print(f"[viewer] camera_follow={self.follow_root}", flush=True)
+            elif keycode in (81, 113):  # Q/q
+                self.quit_requested = True
+
+        self.viewer = mujoco.viewer.launch_passive(self.model, self.data, key_callback=key_callback)
+        with self.viewer.lock():
+            self.viewer.cam.distance = float(camera_distance)
+            self.viewer.cam.azimuth = float(camera_azimuth)
+            self.viewer.cam.elevation = float(camera_elevation)
+        self.viewer.sync()
+        print("[viewer] Controls: Space pause/resume | F camera follow | Q or close window to quit", flush=True)
+
+    def is_running(self) -> bool:
+        return not self.quit_requested and self.viewer.is_running()
+
+    def wait_until_running(self) -> bool:
+        """Keep the GUI responsive while paused and return false after it closes."""
+
+        while self.is_running() and self.paused:
+            self.viewer.sync()
+            time.sleep(0.01)
+        return self.is_running()
+
+    def show_qpos(self, qpos: np.ndarray) -> bool:
+        if not self.is_running():
+            return False
+        qpos = np.asarray(qpos, dtype=np.float64).reshape(-1)
+        if qpos.size != self.model.nq:
+            raise ValueError(f"Expected qpos size {self.model.nq}, got {qpos.size}")
+        with self.viewer.lock():
+            self.data.qpos[:] = qpos
+            self.data.qvel[:] = 0.0
+            if self.model.nu:
+                self.data.ctrl[:] = 0.0
+            mujoco.mj_forward(self.model, self.data)
+            if self.follow_root:
+                self.viewer.cam.lookat[:] = [float(qpos[0]), float(qpos[1]), max(float(qpos[2]), 0.4)]
+        self.viewer.sync()
+        return self.is_running()
+
+    def close(self) -> None:
+        self.viewer.close()
 
 
 def policy_qpos_from_env(wrapped_env: Any, *, expected_qpos_size: int) -> np.ndarray:
@@ -502,7 +574,6 @@ def render_policy_frame(
             return to_rgb_uint8(wrapped_env.render()), True
         except ValueError as exc:
             print(
-                "[INFO] wrapped_env.render() did not return an RGB frame; "
-                f"falling back to MJLab qpos rendering for policy frames ({exc})."
+                f"[INFO] wrapped_env.render() did not return an RGB frame; falling back to MJLab qpos rendering for policy frames ({exc})."
             )
     return renderer.render_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=renderer.model.nq)), False

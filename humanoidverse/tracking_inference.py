@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,15 +25,16 @@ from humanoidverse.export.backward_encoder import (
 )
 from humanoidverse.mjlab_inference_utils import (
     MujocoQposRenderer,
+    MujocoQposViewer,
     add_bool_arg,
     checkpoint_load_device,
     load_mjlab_env_cfg,
+    policy_qpos_from_env,
     render_policy_frame,
 )
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
 from humanoidverse.utils.motion_data import prepare_manifest_dataset_path, prepare_manifest_robot_config_path
 from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
-
 
 DEFAULT_ROBOT_CONFIG = "configs/robots/g1_29dof.yaml"
 
@@ -217,7 +219,11 @@ def run_tracking_inference(
     print(f"[INFO] Expert renderer XML={robot_xml}")
     if qpos_joint_names != control_joint_names:
         print(f"[INFO] Expert qpos joint order differs from control order: {qpos_joint_names}")
-    print(f"[INFO] device={device} disable_dr={disable_dr} disable_obs_noise={disable_obs_noise} save_mp4={save_mp4}")
+    interactive = not headless
+    print(
+        f"[INFO] device={device} disable_dr={disable_dr} disable_obs_noise={disable_obs_noise} "
+        f"interactive={interactive} save_mp4={save_mp4}"
+    )
 
     env._motion_lib.load_all_motions()
     env.is_evaluating = True
@@ -233,6 +239,18 @@ def run_tracking_inference(
         if save_mp4
         else None
     )
+    live_viewer = (
+        MujocoQposViewer(
+            robot_xml,
+            camera_distance=camera_distance,
+            camera_azimuth=camera_azimuth,
+            camera_elevation=camera_elevation,
+            expected_qpos_size=7 + num_dof,
+        )
+        if interactive
+        else None
+    )
+    viewer_closed = False
     try:
         for motion_id in motion_list:
             backward_obs, obs_dict = get_backward_observation(env, motion_id, use_root_height_obs=use_root_height_obs)
@@ -253,10 +271,21 @@ def run_tracking_inference(
             frames: list[np.ndarray] = []
             use_env_render = True
 
+            if live_viewer is not None:
+                live_viewer.show_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=live_viewer.model.nq))
+
             print(f"[INFO] Running policy rollout for motion_id={motion_id}, steps={episode_len}", flush=True)
             for step in range(episode_len):
+                if live_viewer is not None and not live_viewer.wait_until_running():
+                    viewer_closed = True
+                    print("[INFO] MuJoCo viewer closed; stopping tracking inference.", flush=True)
+                    break
+                step_started = time.perf_counter()
                 action = model.act(observation, z[step].unsqueeze(0), mean=True)
                 observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
+
+                if live_viewer is not None:
+                    viewer_closed = not live_viewer.show_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=live_viewer.model.nq))
 
                 if save_mp4:
                     policy_frame, use_env_render = render_policy_frame(
@@ -275,13 +304,24 @@ def run_tracking_inference(
                     print(f"[INFO] Episode ended at step={step}; stopping rollout for motion_id={motion_id}")
                     break
 
+                if live_viewer is not None:
+                    remaining = 1.0 / float(fps) - (time.perf_counter() - step_started)
+                    if remaining > 0.0:
+                        time.sleep(remaining)
+                if viewer_closed:
+                    break
+
             if save_mp4:
                 video_path = output_dir / f"tracking_{motion_id}.mp4"
                 if not frames:
                     raise RuntimeError(f"No frames were rendered for motion_id={motion_id}")
                 media.write_video(str(video_path), frames, fps=fps)
                 print(f"[INFO] Saved side-by-side video: {video_path}")
+            if viewer_closed:
+                break
     finally:
+        if live_viewer is not None:
+            live_viewer.close()
         if expert_renderer is not None:
             expert_renderer.close()
         wrapped_env.close()
@@ -295,7 +335,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-manifest", type=Path, default=None, help="Motion data manifest. Use with --dataset.")
     parser.add_argument("--dataset", default=None, help="Dataset name inside --data-manifest for tracking inference.")
     parser.add_argument("--rebuild-motion-cache", action="store_true", help="Rebuild manifest-generated motion pkl cache.")
-    add_bool_arg(parser, "--headless", True, "Run MuJoCo in headless mode.")
+    add_bool_arg(parser, "--headless", True, "Run without a GUI. Pass false to open the interactive MuJoCo viewer.")
     parser.add_argument("--device", default="cuda:0")
     add_bool_arg(parser, "--save-mp4", False, "Save side-by-side expert/policy MP4.")
     add_bool_arg(parser, "--disable-dr", False, "Disable domain randomization.")
@@ -305,12 +345,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-distance", type=float, default=3.0)
     parser.add_argument("--camera-azimuth", type=float, default=135.0)
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
-    parser.add_argument("--fps", type=int, default=50)
+    parser.add_argument("--fps", type=int, default=50, help="Video FPS and interactive viewer rollout rate.")
     parser.add_argument("--max-steps", type=int, default=None, help="Optional cap on rollout/video frames for quick previews.")
-    parser.add_argument("--log-every-steps", type=int, default=100, help="Print rollout/render progress every N steps; 0 disables periodic logs.")
+    parser.add_argument(
+        "--log-every-steps", type=int, default=100, help="Print rollout/render progress every N steps; 0 disables periodic logs."
+    )
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
     add_bool_arg(parser, "--export-onnx", True, "Export ONNX next to the checkpoint before inference.")
     args = parser.parse_args()
+    if args.fps <= 0:
+        parser.error("--fps must be greater than zero")
     manifest_robot_config = None
     if args.data_manifest is not None:
         if args.data_path is not None:
