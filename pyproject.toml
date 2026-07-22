@@ -35,6 +35,14 @@ dependencies = [
     "wandb>=0.26.0",
 ]
 
+[project.optional-dependencies]
+pico-teleop = [
+    "loop-rate-limiters>=1.1.0",
+    "mink>=0.0.13",
+    "pyzmq>=26.0.0",
+    "qpsolvers[daqp]>=4.8.1",
+]
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
