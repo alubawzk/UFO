@@ -11,9 +11,11 @@ Two PICO sources are supported:
 * Recorded PICO v2 clips containing ``sonic_smpl_*`` arrays, such as
   ``walking_v2.npz`` and ``running_v2.npz``.
 
-JOYIn-Retarget is loaded from ``--joyin-root`` at runtime.  Its
-``smplx_to_mini3`` configuration converts each PICO/Sonic SMPL frame to a
-Mini3 free-base qpos.  A separate Mini3 MuJoCo model then computes the same
+JOYIn-Retarget is loaded from ``--joyin-root`` at runtime.  Each Sonic frame
+is first restored to standard SMPL-X parameters and run through JOYIn's
+SMPL-X body model and ``get_smplx_data`` helper.  JOYIn's
+``smplx_to_mini3`` configuration then converts the resulting human pose to a
+Mini3 free-base qpos.  A separate Mini3 MuJoCo model computes the same
 body-space backward observation used during UFO training, and the policy
 tracks the resulting latent in the pure MuJoCo controller.
 """
@@ -57,50 +59,10 @@ from humanoidverse.utils.torch_utils import quat_rotate_inverse
 DEFAULT_JOYIN_ROOT = Path("/home/amax/Desktop/robot/JOYIn-Retarget")
 DEFAULT_PICO_ENDPOINT = "tcp://127.0.0.1:5556"
 SONIC_HEADER_SIZE = 1280
-
-# Sonic uses the standard SMPL/SMPL-X body-joint order for the first 24
-# joints.  The 21 axis-angle entries are the local rotations for joints 1:22.
-SMPL_BODY_NAMES = (
-    "pelvis",
-    "left_hip",
-    "right_hip",
-    "spine1",
-    "left_knee",
-    "right_knee",
-    "spine2",
-    "left_ankle",
-    "right_ankle",
-    "spine3",
-    "left_foot",
-    "right_foot",
-    "neck",
-    "left_collar",
-    "right_collar",
-    "head",
-    "left_shoulder",
-    "right_shoulder",
-    "left_elbow",
-    "right_elbow",
-    "left_wrist",
-    "right_wrist",
-    "left_hand",
-    "right_hand",
-)
-SMPL_PARENTS = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21)
-JOYIN_REQUIRED_BODIES = (
-    "pelvis",
-    "left_hip",
-    "right_hip",
-    "left_knee",
-    "right_knee",
-    "left_foot",
-    "right_foot",
-    "head",
-    "left_shoulder",
-    "right_shoulder",
-    "left_elbow",
-    "right_elbow",
-)
+SMPLX_NUM_BETAS = 16
+# Sonic removes this SMPL base rotation after converting its root to z-up:
+# q_sonic = q_smplx * conjugate(SMPL_BASE_ROTATION_WXYZ).
+SMPL_BASE_ROTATION_WXYZ = np.full(4, 0.5, dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -113,6 +75,16 @@ class PicoSmplFrame:
     root_translation: np.ndarray
     timestamp: float
     sequence_reset: bool = False
+
+
+@dataclass(frozen=True)
+class SmplxParameters:
+    """One standard neutral SMPL-X frame before body-model forward kinematics."""
+
+    pose_body: np.ndarray
+    root_orient: np.ndarray
+    trans: np.ndarray
+    betas: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -224,46 +196,34 @@ def _validate_pico_frame(frame: PicoSmplFrame) -> PicoSmplFrame:
     )
 
 
-def sonic_frame_to_joyin_pose(
+def sonic_frame_to_smplx_parameters(
     frame: PicoSmplFrame,
     *,
-    root_frame_alignment_wxyz: np.ndarray | None = None,
-) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Build JOYIn's SMPL-X global ``position, quaternion_wxyz`` mapping.
+    betas: np.ndarray | None = None,
+) -> SmplxParameters:
+    """Restore the standard SMPL-X inputs encoded by a Sonic pose message.
 
-    Sonic publishes a z-up root orientation after removing the SMPL base
-    rotation.  JOYIn's IK config expects the original SMPL root frame and
-    applies its own per-body frame offsets.  ``root_frame_alignment_wxyz``
-    restores that frame before global child rotations are accumulated.
+    ``smpl_pose`` already contains the 21 local SMPL-X body rotations.  The
+    published root quaternion is z-up but has Sonic's SMPL base rotation
+    removed, so the inverse right-multiplication restores the root orientation
+    expected by the SMPL-X body model.  Live Sonic does not publish pelvis
+    translation or shape coefficients; those are represented explicitly by
+    zero ``trans`` and neutral zero ``betas`` rather than inferred from its
+    root-local joint positions.
     """
 
     frame = _validate_pico_frame(frame)
-    if root_frame_alignment_wxyz is None:
-        root_alignment = Rotation.identity()
-    else:
-        root_alignment = Rotation.from_quat(
-            _normalize_quaternion_wxyz(root_frame_alignment_wxyz, field="JOYIn SMPL root alignment"),
-            scalar_first=True,
-        )
-    global_rotations: list[Rotation] = [Rotation.identity() for _ in SMPL_BODY_NAMES]
-    global_rotations[0] = Rotation.from_quat(frame.root_quat_wxyz, scalar_first=True) * root_alignment
-    for joint_index in range(1, 22):
-        parent = SMPL_PARENTS[joint_index]
-        local_rotation = Rotation.from_rotvec(frame.smpl_pose[joint_index - 1])
-        global_rotations[joint_index] = global_rotations[parent] * local_rotation
-
-    result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    required = set(JOYIN_REQUIRED_BODIES)
-    for joint_index, name in enumerate(SMPL_BODY_NAMES[:22]):
-        if name not in required:
-            continue
-        position = frame.smpl_joints[joint_index] + frame.root_translation
-        quaternion = global_rotations[joint_index].as_quat(scalar_first=True)
-        result[name] = (position.copy(), quaternion.copy())
-    missing = sorted(required.difference(result))
-    if missing:
-        raise ValueError(f"Cannot build JOYIn pose; missing SMPL-X bodies: {missing}")
-    return result
+    resolved_betas = np.zeros(SMPLX_NUM_BETAS, dtype=np.float64) if betas is None else np.asarray(betas, dtype=np.float64)
+    if resolved_betas.shape != (SMPLX_NUM_BETAS,) or not np.all(np.isfinite(resolved_betas)):
+        raise ValueError(f"SMPL-X betas must have shape ({SMPLX_NUM_BETAS},) with finite values, got {resolved_betas}")
+    sonic_root = Rotation.from_quat(frame.root_quat_wxyz, scalar_first=True)
+    smplx_root = sonic_root * Rotation.from_quat(SMPL_BASE_ROTATION_WXYZ, scalar_first=True)
+    return SmplxParameters(
+        pose_body=frame.smpl_pose.reshape(63).copy(),
+        root_orient=smplx_root.as_rotvec(),
+        trans=frame.root_translation.copy(),
+        betas=resolved_betas.copy(),
+    )
 
 
 class PicoNpzSource:
@@ -411,7 +371,7 @@ def _model_joint_names(model: mujoco.MjModel) -> list[str]:
 
 
 class JoyInMini3Retargeter:
-    """Thin runtime adapter around the local JOYIn GMR implementation."""
+    """Run Sonic through JOYIn's native SMPL-X-to-Mini3 pipeline."""
 
     def __init__(
         self,
@@ -426,6 +386,7 @@ class JoyInMini3Retargeter:
         posture_cost: float,
         velocity_limit: bool,
         offset_to_ground: bool,
+        smplx_device: str,
         verbose: bool,
     ):
         self.joyin_root = joyin_root.expanduser().resolve()
@@ -436,16 +397,44 @@ class JoyInMini3Retargeter:
         if joyin_path not in sys.path:
             sys.path.insert(0, joyin_path)
         try:
+            import smplx
             from general_motion_retargeting import GeneralMotionRetargeting
+            from general_motion_retargeting.utils.smpl import get_smplx_data
         except ImportError as exc:
             raise ImportError(
-                "Cannot import local JOYIn-Retarget. Install the pico-teleop extra so mink and qpsolvers[daqp] are available"
+                "Cannot import the JOYIn SMPL-X pipeline. Install the project's pico-teleop extra so smplx, mink, and "
+                "qpsolvers[daqp] are available"
             ) from exc
+
+        self.smplx_model_file = self.joyin_root / "assets" / "body_models" / "smplx" / "SMPLX_NEUTRAL.pkl"
+        if not self.smplx_model_file.is_file():
+            raise FileNotFoundError(f"JOYIn neutral SMPL-X body model not found: {self.smplx_model_file}")
+        self.smplx_model = smplx.create(
+            str(self.smplx_model_file.parent.parent),
+            model_type="smplx",
+            gender="neutral",
+            ext="pkl",
+            num_betas=SMPLX_NUM_BETAS,
+            use_pca=False,
+            batch_size=1,
+        )
+        self.smplx_device = torch.device(smplx_device)
+        self.smplx_model = self.smplx_model.to(self.smplx_device).eval()
+        self._joyin_smplx_model_view = SimpleNamespace(parents=self.smplx_model.parents.detach().cpu())
+        self.get_smplx_data = get_smplx_data
+        self.smplx_betas = np.zeros(SMPLX_NUM_BETAS, dtype=np.float32)
+        # This is the same neutral-shape fallback used by JOYIn's
+        # load_smplx_file() when beta[0] is zero.
+        self.smplx_human_height = 1.66 + 0.1 * float(self.smplx_betas[0])
+        resolved_human_height = self.smplx_human_height if actual_human_height is None else float(actual_human_height)
+        self.actual_human_height = resolved_human_height
+        self._zero_hand_pose = torch.zeros(1, 45, device=self.smplx_device, dtype=torch.float32)
+        self._zero_face_pose = torch.zeros(1, 3, device=self.smplx_device, dtype=torch.float32)
 
         self.retargeter = GeneralMotionRetargeting(
             src_human="smplx",
             tgt_robot="mini3",
-            actual_human_height=actual_human_height,
+            actual_human_height=resolved_human_height,
             solver=solver,
             damping=float(damping),
             verbose=bool(verbose),
@@ -465,16 +454,41 @@ class JoyInMini3Retargeter:
             ],
             dtype=np.int32,
         )
-        if "pelvis" not in self.retargeter.rot_offsets1:
-            raise ValueError("JOYIn smplx_to_mini3 config does not define the pelvis rotation offset")
-        self.smpl_root_alignment_wxyz = self.retargeter.rot_offsets1["pelvis"].inv().as_quat(scalar_first=True)
         self.offset_to_ground = bool(offset_to_ground)
 
-    def retarget(self, frame: PicoSmplFrame) -> Mini3Reference:
-        human_pose = sonic_frame_to_joyin_pose(
-            frame,
-            root_frame_alignment_wxyz=self.smpl_root_alignment_wxyz,
+    def _smplx_human_pose(self, frame: PicoSmplFrame) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        parameters = sonic_frame_to_smplx_parameters(frame, betas=self.smplx_betas)
+        smplx_data = {
+            "pose_body": parameters.pose_body.reshape(1, 63),
+            "root_orient": parameters.root_orient.reshape(1, 3),
+            "trans": parameters.trans.reshape(1, 3),
+            "betas": parameters.betas,
+        }
+        with torch.inference_mode():
+            smplx_output = self.smplx_model(
+                betas=torch.as_tensor(smplx_data["betas"], device=self.smplx_device, dtype=torch.float32).reshape(1, SMPLX_NUM_BETAS),
+                global_orient=torch.as_tensor(smplx_data["root_orient"], device=self.smplx_device, dtype=torch.float32),
+                body_pose=torch.as_tensor(smplx_data["pose_body"], device=self.smplx_device, dtype=torch.float32),
+                transl=torch.as_tensor(smplx_data["trans"], device=self.smplx_device, dtype=torch.float32),
+                left_hand_pose=self._zero_hand_pose,
+                right_hand_pose=self._zero_hand_pose,
+                jaw_pose=self._zero_face_pose,
+                leye_pose=self._zero_face_pose,
+                reye_pose=self._zero_face_pose,
+                return_full_pose=True,
+            )
+        # JOYIn's get_smplx_data() converts these tensors with NumPy/SciPy, so
+        # copy only its three required outputs back to CPU after an optional
+        # CUDA body-model forward pass.
+        joyin_output = SimpleNamespace(
+            global_orient=smplx_output.global_orient.detach().cpu(),
+            full_pose=smplx_output.full_pose.detach().cpu(),
+            joints=smplx_output.joints.detach().cpu(),
         )
+        return self.get_smplx_data(smplx_data, self._joyin_smplx_model_view, joyin_output, 0)
+
+    def retarget(self, frame: PicoSmplFrame) -> Mini3Reference:
+        human_pose = self._smplx_human_pose(frame)
         qpos = np.asarray(
             self.retargeter.retarget(human_pose, offset_to_ground=self.offset_to_ground),
             dtype=np.float64,
@@ -485,6 +499,118 @@ class JoyInMini3Retargeter:
             root_pos=qpos[:3].copy(),
             root_quat_wxyz=_normalize_quaternion_wxyz(qpos[3:7], field="JOYIn root quaternion"),
             dof_pos=qpos[self.qpos_addresses].copy(),
+        )
+
+
+class StartupReferenceGrounder:
+    """Apply one fixed root-z correction measured from the first Mini3 pose."""
+
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        layout: JointLayout,
+        foot_body_names: list[str],
+        *,
+        ground_height: float,
+        enabled: bool,
+    ):
+        if not math.isfinite(ground_height):
+            raise ValueError(f"Reference ground height must be finite, got {ground_height}")
+        if not foot_body_names:
+            raise ValueError("At least one foot body is required to ground the Mini3 reference")
+
+        self.model = model
+        self.layout = layout
+        self.data = mujoco.MjData(model)
+        self.ground_height = float(ground_height)
+        self.enabled = bool(enabled)
+        self.foot_body_names = tuple(str(name) for name in foot_body_names)
+        foot_body_ids: list[int] = []
+        for name in self.foot_body_names:
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if body_id < 0:
+                raise ValueError(f"Mini3 model is missing configured foot body {name!r}")
+            foot_body_ids.append(body_id)
+
+        # Contact-enabled geoms are the collision representation.  This
+        # excludes Mini3's duplicate visual meshes on the same foot bodies.
+        collision_mask = np.logical_or(model.geom_contype != 0, model.geom_conaffinity != 0)
+        foot_mask = np.isin(model.geom_bodyid, np.asarray(foot_body_ids, dtype=np.int32))
+        self.foot_geom_ids = np.flatnonzero(np.logical_and(collision_mask, foot_mask)).astype(np.int32)
+        if self.foot_geom_ids.size == 0:
+            raise ValueError(f"No contact-enabled geoms found on Mini3 foot bodies {self.foot_body_names}")
+        self.foot_geom_names = tuple(
+            str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id))) for geom_id in self.foot_geom_ids
+        )
+        self.z_offset: float | None = 0.0 if not self.enabled else None
+        self.initial_lowest_foot_z: float | None = None
+
+    @property
+    def calibrated(self) -> bool:
+        return self.z_offset is not None
+
+    def _qpos(self, reference: Mini3Reference) -> np.ndarray:
+        if reference.dof_pos.shape != (len(self.layout.names),):
+            raise ValueError(f"Mini3 reference has {reference.dof_pos.size} joints, expected {len(self.layout.names)}")
+        qpos = np.zeros(self.model.nq, dtype=np.float64)
+        qpos[:3] = reference.root_pos
+        qpos[3:7] = reference.root_quat_wxyz
+        qpos[self.layout.qpos_adr] = reference.dof_pos
+        return qpos
+
+    def _geom_lowest_z(self, geom_id: int) -> float:
+        geom_type = int(self.model.geom_type[geom_id])
+        position = self.data.geom_xpos[geom_id]
+        rotation = self.data.geom_xmat[geom_id].reshape(3, 3)
+        size = self.model.geom_size[geom_id]
+        if geom_type == int(mujoco.mjtGeom.mjGEOM_MESH):
+            mesh_id = int(self.model.geom_dataid[geom_id])
+            vertex_start = int(self.model.mesh_vertadr[mesh_id])
+            vertex_count = int(self.model.mesh_vertnum[mesh_id])
+            vertices = self.model.mesh_vert[vertex_start : vertex_start + vertex_count]
+            return float(np.min(vertices @ rotation[2] + position[2]))
+        if geom_type == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+            return float(position[2] - size[0])
+        if geom_type == int(mujoco.mjtGeom.mjGEOM_CAPSULE):
+            return float(position[2] - size[1] * abs(rotation[2, 2]) - size[0])
+        if geom_type == int(mujoco.mjtGeom.mjGEOM_BOX):
+            return float(position[2] - np.dot(np.abs(rotation[2]), size[:3]))
+        if geom_type == int(mujoco.mjtGeom.mjGEOM_ELLIPSOID):
+            return float(position[2] - np.linalg.norm(rotation[2] * size[:3]))
+        if geom_type == int(mujoco.mjtGeom.mjGEOM_CYLINDER):
+            axis_z = float(rotation[2, 2])
+            radial_z = math.sqrt(max(0.0, 1.0 - axis_z * axis_z))
+            return float(position[2] - size[1] * abs(axis_z) - size[0] * radial_z)
+        geom_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+        raise NotImplementedError(f"Cannot ground unsupported foot geom {geom_name!r} with type={geom_type}")
+
+    def lowest_foot_z(self, reference: Mini3Reference) -> float:
+        self.data.qpos[:] = self._qpos(reference)
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        return min(self._geom_lowest_z(int(geom_id)) for geom_id in self.foot_geom_ids)
+
+    def apply(self, reference: Mini3Reference) -> Mini3Reference:
+        """Calibrate on the first call, then add the same offset to every frame."""
+
+        if self.z_offset is None:
+            self.initial_lowest_foot_z = self.lowest_foot_z(reference)
+            self.z_offset = self.ground_height - self.initial_lowest_foot_z
+            print(
+                "[pico-teleop] "
+                f"startup_grounding lowest_foot_z={self.initial_lowest_foot_z:.6f}m "
+                f"ground_z={self.ground_height:.6f}m z_offset={self.z_offset:+.6f}m "
+                f"foot_geoms={list(self.foot_geom_names)}",
+                flush=True,
+            )
+        if self.z_offset == 0.0:
+            return reference
+        grounded_root_pos = np.asarray(reference.root_pos, dtype=np.float64).copy()
+        grounded_root_pos[2] += self.z_offset
+        return Mini3Reference(
+            root_pos=grounded_root_pos,
+            root_quat_wxyz=np.asarray(reference.root_quat_wxyz, dtype=np.float64).copy(),
+            dof_pos=np.asarray(reference.dof_pos, dtype=np.float64).copy(),
         )
 
 
@@ -614,6 +740,136 @@ class OnlineMini3ReferenceEncoder:
         }
 
 
+class RetargetReferenceVisualizer:
+    """Populate a viewer user scene with a side-by-side Mini3 reference ghost."""
+
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        layout: JointLayout,
+        *,
+        lateral_offset: float,
+        alpha: float,
+    ):
+        self.model = model
+        self.layout = layout
+        self.lateral_offset = float(lateral_offset)
+        self.rgba = np.asarray([0.05, 0.85, 1.0, float(alpha)], dtype=np.float32)
+        self.data = mujoco.MjData(model)
+        self.scene = mujoco.MjvScene(model, maxgeom=max(100, 2 * model.ngeom))
+        self.option = mujoco.MjvOption()
+        self.camera = mujoco.MjvCamera()
+        self.perturb = mujoco.MjvPerturb()
+        mujoco.mjv_defaultOption(self.option)
+        mujoco.mjv_defaultCamera(self.camera)
+        mujoco.mjv_defaultPerturb(self.perturb)
+        # Mini3 group 2 contains the visual meshes.  Collision geoms in group
+        # 1 would make the translucent reference unnecessarily cluttered.
+        self.option.geomgroup[:] = 0
+        self.option.geomgroup[2] = 1
+
+    def update(
+        self,
+        user_scene: mujoco.MjvScene,
+        reference: Mini3Reference,
+        simulated_root_pos: np.ndarray,
+    ) -> int:
+        """Render ``reference`` beside the simulated robot and return its geom count."""
+
+        qpos = np.zeros(self.model.nq, dtype=np.float64)
+        qpos[:3] = reference.root_pos
+        qpos[0] = float(simulated_root_pos[0])
+        qpos[1] = float(simulated_root_pos[1]) + self.lateral_offset
+        qpos[3:7] = reference.root_quat_wxyz
+        qpos[self.layout.qpos_adr] = reference.dof_pos
+        self.data.qpos[:] = qpos
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        mujoco.mjv_updateScene(
+            self.model,
+            self.data,
+            self.option,
+            self.perturb,
+            self.camera,
+            mujoco.mjtCatBit.mjCAT_ALL,
+            self.scene,
+        )
+
+        user_scene.ngeom = 0
+        for source_index in range(self.scene.ngeom):
+            source = self.scene.geoms[source_index]
+            if int(source.objtype) != int(mujoco.mjtObj.mjOBJ_GEOM):
+                continue
+            geom_id = int(source.objid)
+            if geom_id < 0 or int(self.model.geom_bodyid[geom_id]) == 0 or int(self.model.geom_group[geom_id]) != 2:
+                continue
+            if user_scene.ngeom >= user_scene.maxgeom:
+                break
+            target = user_scene.geoms[user_scene.ngeom]
+            mujoco.mjv_initGeom(
+                target,
+                int(source.type),
+                np.asarray(source.size, dtype=np.float64),
+                np.asarray(source.pos, dtype=np.float64),
+                np.asarray(source.mat, dtype=np.float64).reshape(9),
+                self.rgba,
+            )
+            target.dataid = int(source.dataid)
+            target.matid = -1
+            target.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
+            target.objtype = int(mujoco.mjtObj.mjOBJ_UNKNOWN)
+            target.objid = -1
+            target.segid = -1
+            target.modelrbound = float(source.modelrbound)
+            target.camdist = float(source.camdist)
+            target.emission = float(source.emission)
+            target.specular = float(source.specular)
+            target.shininess = float(source.shininess)
+            target.reflectance = float(source.reflectance)
+            target.texcoord = int(source.texcoord)
+            target.transparent = 1
+            user_scene.ngeom += 1
+        return int(user_scene.ngeom)
+
+
+class PicoTeleopViewer(DebugViewer):
+    """Debug viewer augmented with a translucent JOYIn Mini3 reference."""
+
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        layout: JointLayout,
+        *,
+        distance: float,
+        azimuth: float,
+        elevation: float,
+        reference_lateral_offset: float,
+        reference_alpha: float,
+    ):
+        super().__init__(model, data, distance=distance, azimuth=azimuth, elevation=elevation)
+        self.reference: Mini3Reference | None = None
+        self.reference_visualizer = RetargetReferenceVisualizer(
+            model,
+            layout,
+            lateral_offset=reference_lateral_offset,
+            alpha=reference_alpha,
+        )
+        print(
+            f"[viewer] cyan Mini3=JOYIn retarget reference, lateral_offset={reference_lateral_offset:g}m",
+            flush=True,
+        )
+
+    def set_reference(self, reference: Mini3Reference) -> None:
+        self.reference = reference
+
+    def sync(self, *, step: int, torque: np.ndarray) -> None:
+        if self.reference is not None:
+            with self.viewer.lock():
+                self.reference_visualizer.update(self.viewer.user_scn, self.reference, self.data.qpos[:3])
+        super().sync(step=step, torque=torque)
+
+
 class LatentSmoother:
     def __init__(self, window: int, gamma: float, *, renormalize: bool):
         self.values: deque[torch.Tensor] = deque(maxlen=int(window))
@@ -718,6 +974,7 @@ def run(args: argparse.Namespace) -> None:
         posture_cost=args.joyin_posture_cost,
         velocity_limit=args.joyin_velocity_limit,
         offset_to_ground=args.joyin_offset_to_ground,
+        smplx_device=args.smplx_device or args.device,
         verbose=args.joyin_verbose,
     )
     policy = _load_policy(model_folder, args.device)
@@ -742,6 +999,13 @@ def run(args: argparse.Namespace) -> None:
         ground_friction=args.ground_friction,
     )
     data = mujoco.MjData(model)
+    reference_grounder = StartupReferenceGrounder(
+        model,
+        layout,
+        [str(name) for name in robot_training["robot"].get("feet", [])],
+        ground_height=args.retarget_ground_height,
+        enabled=args.auto_ground_retarget_reference,
+    )
     rng = np.random.default_rng(args.seed)
     delay_steps = _sample_action_delays(robot_training, rng, enabled=not args.disable_action_delay)
     imu_cfg = robot_training.get("imu_delay", {})
@@ -775,22 +1039,38 @@ def run(args: argparse.Namespace) -> None:
         ankle_motor_torque_limit=args.ankle_motor_torque_limit,
     )
 
-    viewer = (
-        None
-        if args.headless
-        else DebugViewer(
+    if args.headless:
+        viewer: DebugViewer | PicoTeleopViewer | None = None
+    elif args.show_retarget_reference:
+        viewer = PicoTeleopViewer(
+            model,
+            data,
+            layout,
+            distance=args.camera_distance,
+            azimuth=args.camera_azimuth,
+            elevation=args.camera_elevation,
+            reference_lateral_offset=args.retarget_visual_lateral_offset,
+            reference_alpha=args.retarget_visual_alpha,
+        )
+    else:
+        viewer = DebugViewer(
             model,
             data,
             distance=args.camera_distance,
             azimuth=args.camera_azimuth,
             elevation=args.camera_elevation,
         )
-    )
     source_name = args.pico_endpoint if source.is_live else str(source.path)
     print(
         "[pico-teleop] "
-        f"source={source_name} joyin={retargeter.joyin_root} physics={physics_hz:g}Hz "
+        f"source={source_name} joyin={retargeter.joyin_root} smplx={retargeter.smplx_device} physics={physics_hz:g}Hz "
         f"policy={policy_hz:g}Hz latent_smoothing={args.latent_window}@{args.latent_gamma:g}",
+        flush=True,
+    )
+    print(
+        "[pico-teleop] "
+        f"smplx_model={retargeter.smplx_model_file} betas=neutral-zero[{SMPLX_NUM_BETAS}] "
+        f"human_height={retargeter.actual_human_height:g}m pipeline=JOYIn:get_smplx_data->GeneralMotionRetargeting",
         flush=True,
     )
     if source.is_live:
@@ -802,7 +1082,7 @@ def run(args: argparse.Namespace) -> None:
         if viewer is not None:
             viewer.close()
         raise TimeoutError(f"No PICO pose received within {args.connect_timeout_ms} ms")
-    first_reference = retargeter.retarget(first_frame)
+    first_reference = reference_grounder.apply(retargeter.retarget(first_frame))
     first_backward_obs = reference_encoder.backward_observation(first_reference)
     with torch.no_grad():
         current_z = latent_smoother.update(policy.project_z(policy.backward_map(first_backward_obs)))
@@ -847,7 +1127,7 @@ def run(args: argparse.Namespace) -> None:
                     measured_dt = float(frame.timestamp) - previous_frame_timestamp
                     sample_dt = measured_dt if 0.25 * policy_dt <= measured_dt <= 5.0 * policy_dt else policy_dt
                 retarget_started = time.perf_counter()
-                latest_reference = retargeter.retarget(frame)
+                latest_reference = reference_grounder.apply(retargeter.retarget(frame))
                 backward_obs = reference_encoder.backward_observation(latest_reference, sample_dt=sample_dt)
                 with torch.no_grad():
                     current_z = latent_smoother.update(policy.project_z(policy.backward_map(backward_obs)))
@@ -870,6 +1150,8 @@ def run(args: argparse.Namespace) -> None:
             step += 1
 
             if viewer is not None:
+                if isinstance(viewer, PicoTeleopViewer):
+                    viewer.set_reference(latest_reference)
                 viewer.sync(step=step, torque=controller.torque)
             if step == 1 or step % args.log_every == 0:
                 print(
@@ -899,6 +1181,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joyin-root", type=Path, default=DEFAULT_JOYIN_ROOT)
     parser.add_argument("--robot-config", type=Path, default=Path(DEFAULT_ROBOT_CONFIG))
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--smplx-device", default=None, help="SMPL-X body-model device; defaults to --device.")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--connect-timeout-ms", type=int, default=10000)
@@ -906,12 +1189,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--physics-hz", type=float, default=500.0)
     parser.add_argument("--policy-hz", type=float, default=50.0)
     parser.add_argument("--ground-friction", type=float, default=1.0)
-    parser.add_argument("--root-z-offset", type=float, default=0.0)
+    parser.add_argument(
+        "--root-z-offset",
+        type=float,
+        default=0.0,
+        help="Additional root-z adjustment for the simulated robot after reference grounding.",
+    )
+    parser.add_argument(
+        "--retarget-ground-height",
+        type=float,
+        default=0.0,
+        help="World z height used by the one-time Mini3 reference foot grounding calibration.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--camera-distance", type=float, default=3.0)
     parser.add_argument("--camera-azimuth", type=float, default=135.0)
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
+    parser.add_argument("--retarget-visual-lateral-offset", type=float, default=1.0)
+    parser.add_argument("--retarget-visual-alpha", type=float, default=0.45)
     parser.add_argument("--actual-human-height", type=float, default=None)
     parser.add_argument("--joyin-solver", default="daqp")
     parser.add_argument("--joyin-damping", type=float, default=0.5)
@@ -920,6 +1216,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latent-window", type=int, default=3)
     parser.add_argument("--latent-gamma", type=float, default=0.8)
     _add_bool_arg(parser, "--headless", False, "Run without the interactive MuJoCo viewer.")
+    _add_bool_arg(parser, "--show-retarget-reference", True, "Show the JOYIn Mini3 reference beside the simulated robot.")
+    _add_bool_arg(
+        parser,
+        "--auto-ground-retarget-reference",
+        True,
+        "Measure a fixed Mini3 root-z offset from the first retargeted pose so its lowest foot point touches the ground.",
+    )
     _add_bool_arg(parser, "--loop", False, "Loop a recorded PICO NPZ.")
     _add_bool_arg(parser, "--realtime", True, "Rate-limit rollout to policy_hz.")
     _add_bool_arg(parser, "--enable-recorded-root-motion", True, "Restore root displacement from recorded body_pos_w.")
@@ -951,8 +1254,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--physics-hz and --policy-hz must be positive")
     if args.ground_friction <= 0.0:
         parser.error("--ground-friction must be positive")
+    if not math.isfinite(args.root_z_offset) or not math.isfinite(args.retarget_ground_height):
+        parser.error("--root-z-offset and --retarget-ground-height must be finite")
     if args.log_every <= 0:
         parser.error("--log-every must be positive")
+    if not math.isfinite(args.retarget_visual_lateral_offset):
+        parser.error("--retarget-visual-lateral-offset must be finite")
+    if not 0.0 < args.retarget_visual_alpha <= 1.0:
+        parser.error("--retarget-visual-alpha must be in (0, 1]")
     if args.actual_human_height is not None and args.actual_human_height <= 0.0:
         parser.error("--actual-human-height must be positive")
     if args.joyin_damping <= 0.0 or args.joyin_max_iter <= 0 or args.joyin_posture_cost < 0.0:

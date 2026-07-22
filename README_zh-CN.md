@@ -335,7 +335,22 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference 
   --headless false \
   --loop true \
   --enable-real-motor false
+
+#   --motion-id 2 \
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/Revise_torque_limit \
+  --data-path humanoidverse/data/lafan1_mini3_ufo/walk2_subject4__clip001.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless false \
+  --loop true \
+  --show-reference-motion true \
+  --reference-lateral-offset 1.0 \
+  --reference-alpha 0.45 \
+  --enable-real-motor false
 ```
+
+该命令会同时显示两台 Mini3：原材质机器人是 policy 实际控制的 MuJoCo 机器人，青色半透明机器人是 `motion-id 2` 对应的 MotionLib reference motion，并沿 Y 方向错开 `1.0 m` 方便对比。
 
 纯 MuJoCo 推理默认启用与 Mini3 新训练相同的电机侧模型；参数来自
 `mini3_lab/sim2sim_mini3_bm.py`：4340P/4310P T-N 曲线、PI 电流环与一阶力矩响应、1 个 500 Hz physics step

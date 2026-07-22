@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -15,10 +16,13 @@ from humanoidverse.mujoco_pico_teleop import (
     OnlineMini3ReferenceEncoder,
     PicoNpzSource,
     PicoSmplFrame,
+    RetargetReferenceVisualizer,
+    StartupReferenceGrounder,
     rotation_6d_columns_to_quat_wxyz,
-    sonic_frame_to_joyin_pose,
+    sonic_frame_to_smplx_parameters,
     unpack_sonic_pose_message,
 )
+from humanoidverse.mujoco_tracking_inference import _joint_layout
 from humanoidverse.utils.robot_spec import load_robot_spec
 
 
@@ -47,37 +51,47 @@ class TestSonicWireFormat(unittest.TestCase):
             unpack_sonic_pose_message(message)
 
 
-class TestSonicSmplAdapter(unittest.TestCase):
+class TestSonicSmplxAdapter(unittest.TestCase):
     def test_rotation_6d_uses_sonic_column_layout(self) -> None:
         expected = Rotation.from_euler("xyz", [0.2, -0.3, 0.4])
         encoded = expected.as_matrix()[:, :2].reshape(6)
         actual = Rotation.from_quat(rotation_6d_columns_to_quat_wxyz(encoded), scalar_first=True)
         np.testing.assert_allclose(actual.as_matrix(), expected.as_matrix(), atol=1.0e-7)
 
-    def test_builds_global_smpl_orientations_for_joyin(self) -> None:
-        pose = np.zeros((21, 3), dtype=np.float64)
-        pose[0] = [0.0, 0.0, np.pi / 2.0]  # left hip, child of pelvis
-        pose[3] = [np.pi / 2.0, 0.0, 0.0]  # left knee, child of left hip
-        joints = np.arange(24 * 3, dtype=np.float64).reshape(24, 3) / 100.0
+    def test_restores_standard_smplx_parameters(self) -> None:
+        pose = np.arange(63, dtype=np.float64).reshape(21, 3) / 100.0
+        expected_root = Rotation.from_euler("xyz", [0.2, -0.3, 0.4])
+        smpl_base = Rotation.from_quat(np.full(4, 0.5), scalar_first=True)
+        sonic_root = expected_root * smpl_base.inv()
         translation = np.array([1.0, 2.0, 3.0])
         frame = PicoSmplFrame(
             smpl_pose=pose,
-            smpl_joints=joints,
-            root_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+            smpl_joints=np.arange(24 * 3, dtype=np.float64).reshape(24, 3),
+            root_quat_wxyz=sonic_root.as_quat(scalar_first=True),
             root_translation=translation,
             timestamp=0.0,
         )
 
-        result = sonic_frame_to_joyin_pose(frame)
+        parameters = sonic_frame_to_smplx_parameters(frame)
 
-        left_hip = Rotation.from_quat(result["left_hip"][1], scalar_first=True)
-        left_knee = Rotation.from_quat(result["left_knee"][1], scalar_first=True)
-        expected_hip = Rotation.from_rotvec(pose[0])
-        expected_knee = expected_hip * Rotation.from_rotvec(pose[3])
-        np.testing.assert_allclose(left_hip.as_matrix(), expected_hip.as_matrix(), atol=1.0e-7)
-        np.testing.assert_allclose(left_knee.as_matrix(), expected_knee.as_matrix(), atol=1.0e-7)
-        np.testing.assert_allclose(result["left_knee"][0], joints[4] + translation)
-        self.assertEqual(len(result), 12)
+        np.testing.assert_allclose(parameters.pose_body, pose.reshape(63))
+        np.testing.assert_allclose(Rotation.from_rotvec(parameters.root_orient).as_matrix(), expected_root.as_matrix(), atol=1.0e-7)
+        np.testing.assert_allclose(parameters.trans, translation)
+        np.testing.assert_array_equal(parameters.betas, np.zeros(16))
+
+    def test_does_not_use_sonic_local_joint_positions_as_smplx_input(self) -> None:
+        common = {
+            "smpl_pose": np.zeros((21, 3)),
+            "root_quat_wxyz": np.array([1.0, 0.0, 0.0, 0.0]),
+            "root_translation": np.zeros(3),
+            "timestamp": 0.0,
+        }
+        first = sonic_frame_to_smplx_parameters(PicoSmplFrame(smpl_joints=np.zeros((24, 3)), **common))
+        second = sonic_frame_to_smplx_parameters(PicoSmplFrame(smpl_joints=np.ones((24, 3)), **common))
+
+        np.testing.assert_array_equal(first.pose_body, second.pose_body)
+        np.testing.assert_array_equal(first.root_orient, second.root_orient)
+        np.testing.assert_array_equal(first.trans, second.trans)
 
 
 class TestPicoNpzSource(unittest.TestCase):
@@ -157,6 +171,69 @@ class TestOnlineMini3ReferenceEncoder(unittest.TestCase):
         self.assertAlmostEqual(second_obs["state"][0, 21].item(), 5.0, places=5)
         for value in second_obs.values():
             self.assertTrue(torch.isfinite(value).all())
+
+
+class TestStartupReferenceGrounder(unittest.TestCase):
+    def test_calibrates_once_from_lowest_foot_collision_mesh(self) -> None:
+        robot_spec = load_robot_spec("configs/robots/mini3.yaml")
+        model = mujoco.MjModel.from_xml_path(robot_spec.xml_path)
+        layout = _joint_layout(model, list(robot_spec.control_joint_names))
+        grounder = StartupReferenceGrounder(
+            model,
+            layout,
+            list(robot_spec.feet),
+            ground_height=0.0,
+            enabled=True,
+        )
+        first = Mini3Reference(
+            root_pos=np.array([0.0, 0.0, 0.5]),
+            root_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=np.zeros(len(robot_spec.control_joint_names)),
+        )
+
+        grounded_first = grounder.apply(first)
+
+        self.assertTrue(grounder.calibrated)
+        self.assertIsNotNone(grounder.z_offset)
+        self.assertAlmostEqual(grounder.lowest_foot_z(grounded_first), 0.0, places=7)
+        np.testing.assert_array_equal(first.root_pos, [0.0, 0.0, 0.5])
+        first_offset = grounder.z_offset
+
+        second_dof = np.zeros(len(robot_spec.control_joint_names))
+        second_dof[4] = 0.2
+        second = Mini3Reference(
+            root_pos=np.array([0.2, -0.1, 0.6]),
+            root_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=second_dof,
+        )
+        grounded_second = grounder.apply(second)
+
+        self.assertEqual(grounder.z_offset, first_offset)
+        self.assertAlmostEqual(grounded_second.root_pos[2] - second.root_pos[2], first_offset, places=12)
+
+
+class TestRetargetReferenceVisualizer(unittest.TestCase):
+    def test_renders_translucent_reference_beside_simulated_robot(self) -> None:
+        robot_spec = load_robot_spec("configs/robots/mini3.yaml")
+        model = mujoco.MjModel.from_xml_path(robot_spec.xml_path)
+        layout = _joint_layout(model, list(robot_spec.control_joint_names))
+        visualizer = RetargetReferenceVisualizer(model, layout, lateral_offset=1.25, alpha=0.4)
+        user_scene = mujoco.MjvScene(model, maxgeom=100)
+        reference = Mini3Reference(
+            root_pos=np.array([10.0, -5.0, 0.52]),
+            root_quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0]),
+            dof_pos=np.zeros(len(robot_spec.control_joint_names)),
+        )
+
+        geom_count = visualizer.update(user_scene, reference, np.array([2.0, 3.0, 0.48]))
+
+        self.assertGreater(geom_count, 0)
+        self.assertEqual(geom_count, user_scene.ngeom)
+        np.testing.assert_allclose(visualizer.data.qpos[:3], [2.0, 4.25, 0.52])
+        for geom_index in range(geom_count):
+            geom = user_scene.geoms[geom_index]
+            np.testing.assert_allclose(geom.rgba, [0.05, 0.85, 1.0, 0.4], atol=1.0e-6)
+            self.assertEqual(int(geom.category), int(mujoco.mjtCatBit.mjCAT_DECOR))
 
 
 class TestLatentSmoother(unittest.TestCase):

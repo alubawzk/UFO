@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import mujoco
+import numpy as np
 from omegaconf import OmegaConf
 
 from humanoidverse.utils.robot_spec import load_robot_training_spec
@@ -39,19 +40,51 @@ CONTROL_JOINTS = [
 ]
 
 KPS = [
-    60.0, 55.0, 25.0, 60.0, 50.0, 45.0,
-    60.0, 55.0, 25.0, 60.0, 50.0, 45.0,
+    60.0,
+    55.0,
+    25.0,
+    60.0,
+    50.0,
+    45.0,
+    60.0,
+    55.0,
+    25.0,
+    60.0,
+    50.0,
+    45.0,
     65.0,
-    30.0, 25.0, 30.0, 20.0,
-    30.0, 25.0, 30.0, 20.0,
+    30.0,
+    25.0,
+    30.0,
+    20.0,
+    30.0,
+    25.0,
+    30.0,
+    20.0,
 ]
 
 KDS = [
-    4.5, 2.8, 1.1, 4.5, 1.2, 1.2,
-    4.5, 2.8, 1.1, 4.5, 1.2, 1.2,
+    4.5,
+    2.8,
+    1.1,
+    4.5,
+    1.2,
+    1.2,
+    4.5,
+    2.8,
+    1.1,
+    4.5,
+    1.2,
+    1.2,
     3.0,
-    1.0, 2.0, 1.0, 1.0,
-    1.0, 2.0, 1.0, 1.0,
+    1.0,
+    2.0,
+    1.0,
+    1.0,
+    1.0,
+    2.0,
+    1.0,
+    1.0,
 ]
 
 
@@ -108,22 +141,29 @@ class Mini3RobotConfigTest(unittest.TestCase):
             self.assertAlmostEqual(float(model.dof_frictionloss[dof_id]), expected["friction"])
             self.assertAlmostEqual(float(model.dof_damping[dof_id]), expected["viscous_friction"])
 
-    def test_mjcf_enables_non_adjacent_self_collision_only(self) -> None:
+    def test_mjcf_disables_self_collision_but_keeps_environment_contact_mask(self) -> None:
         root = ET.parse(XML_PATH).getroot()
         collision_default = root.find("./default/default/default[@class='collision']/geom")
         self.assertIsNotNone(collision_default)
-        self.assertNotEqual(int(collision_default.attrib["contype"]), 0)
+        self.assertEqual(int(collision_default.attrib["contype"]), 0)
         self.assertNotEqual(int(collision_default.attrib["conaffinity"]), 0)
+
+        model = mujoco.MjModel.from_xml_path(str(XML_PATH))
+        collision_geom_ids = np.flatnonzero(model.geom_group == 1)
+        self.assertGreater(collision_geom_ids.size, 0)
+        for geom_id in collision_geom_ids:
+            self.assertEqual(int(model.geom_contype[geom_id]), 0)
+            self.assertNotEqual(int(model.geom_conaffinity[geom_id]), 0)
+            # Pure MuJoCo inference creates its ground with contype=1 and
+            # conaffinity=1, so the second mask direction remains active.
+            self.assertNotEqual(1 & int(model.geom_conaffinity[geom_id]), 0)
 
         adjacent_pairs = {
             frozenset((parent.attrib["name"], child.attrib["name"]))
             for parent in root.findall(".//body")
             for child in parent.findall("./body")
         }
-        excluded_pairs = {
-            frozenset((exclude.attrib["body1"], exclude.attrib["body2"]))
-            for exclude in root.findall("./contact/exclude")
-        }
+        excluded_pairs = {frozenset((exclude.attrib["body1"], exclude.attrib["body2"])) for exclude in root.findall("./contact/exclude")}
         self.assertEqual(excluded_pairs, adjacent_pairs)
 
     def test_hydra_config_dimensions_and_order_match_robot_spec(self) -> None:

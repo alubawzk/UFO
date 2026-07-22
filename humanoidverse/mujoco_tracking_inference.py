@@ -139,6 +139,19 @@ class JointLayout:
     actuator_adr: np.ndarray
 
 
+@dataclass(frozen=True)
+class MotionReferenceTrajectory:
+    """Reference root and joint poses copied to CPU for viewer playback."""
+
+    root_pos: np.ndarray
+    root_quat_wxyz: np.ndarray
+    dof_pos: np.ndarray
+
+    @property
+    def frame_count(self) -> int:
+        return int(self.dof_pos.shape[0])
+
+
 def _joint_layout(model: mujoco.MjModel, joint_names: list[str]) -> JointLayout:
     qpos_adr: list[int] = []
     dof_adr: list[int] = []
@@ -529,6 +542,146 @@ class DebugViewer:
         self.viewer.close()
 
 
+class MotionReferenceVisualizer:
+    """Populate a viewer user scene with a translucent reference robot."""
+
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        layout: JointLayout,
+        *,
+        lateral_offset: float,
+        alpha: float,
+    ):
+        self.model = model
+        self.layout = layout
+        self.lateral_offset = float(lateral_offset)
+        self.rgba = np.asarray([0.05, 0.85, 1.0, float(alpha)], dtype=np.float32)
+        self.data = mujoco.MjData(model)
+        self.scene = mujoco.MjvScene(model, maxgeom=max(100, 2 * model.ngeom))
+        self.option = mujoco.MjvOption()
+        self.camera = mujoco.MjvCamera()
+        self.perturb = mujoco.MjvPerturb()
+        mujoco.mjv_defaultOption(self.option)
+        mujoco.mjv_defaultCamera(self.camera)
+        mujoco.mjv_defaultPerturb(self.perturb)
+
+        robot_geom_mask = model.geom_bodyid != 0
+        non_contact_mask = np.logical_and(model.geom_contype == 0, model.geom_conaffinity == 0)
+        visual_geom_ids = np.flatnonzero(np.logical_and(robot_geom_mask, non_contact_mask))
+        # Some robot XMLs render their collision representation directly.
+        # Use it only when no dedicated non-contact visual geoms exist.
+        if visual_geom_ids.size == 0:
+            visual_geom_ids = np.flatnonzero(robot_geom_mask)
+        self.visual_geom_ids = frozenset(int(geom_id) for geom_id in visual_geom_ids)
+
+    def update(
+        self,
+        user_scene: mujoco.MjvScene,
+        trajectory: MotionReferenceTrajectory,
+        frame_index: int,
+    ) -> int:
+        """Render one reference frame beside the simulated robot."""
+
+        if trajectory.frame_count <= 0:
+            raise ValueError("Reference trajectory contains no frames")
+        index = min(max(int(frame_index), 0), trajectory.frame_count - 1)
+        if trajectory.dof_pos.shape[1:] != (len(self.layout.names),):
+            raise ValueError(f"Reference trajectory has {trajectory.dof_pos.shape[-1]} joints, expected {len(self.layout.names)}")
+        qpos = np.zeros(self.model.nq, dtype=np.float64)
+        qpos[:3] = trajectory.root_pos[index]
+        qpos[1] += self.lateral_offset
+        qpos[3:7] = trajectory.root_quat_wxyz[index]
+        qpos[self.layout.qpos_adr] = trajectory.dof_pos[index]
+        self.data.qpos[:] = qpos
+        self.data.qvel[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        mujoco.mjv_updateScene(
+            self.model,
+            self.data,
+            self.option,
+            self.perturb,
+            self.camera,
+            mujoco.mjtCatBit.mjCAT_ALL,
+            self.scene,
+        )
+
+        user_scene.ngeom = 0
+        for source_index in range(self.scene.ngeom):
+            source = self.scene.geoms[source_index]
+            if int(source.objtype) != int(mujoco.mjtObj.mjOBJ_GEOM):
+                continue
+            if int(source.objid) not in self.visual_geom_ids:
+                continue
+            if user_scene.ngeom >= user_scene.maxgeom:
+                break
+            target = user_scene.geoms[user_scene.ngeom]
+            mujoco.mjv_initGeom(
+                target,
+                int(source.type),
+                np.asarray(source.size, dtype=np.float64),
+                np.asarray(source.pos, dtype=np.float64),
+                np.asarray(source.mat, dtype=np.float64).reshape(9),
+                self.rgba,
+            )
+            target.dataid = int(source.dataid)
+            target.matid = -1
+            target.category = int(mujoco.mjtCatBit.mjCAT_DECOR)
+            target.objtype = int(mujoco.mjtObj.mjOBJ_UNKNOWN)
+            target.objid = -1
+            target.segid = -1
+            target.modelrbound = float(source.modelrbound)
+            target.camdist = float(source.camdist)
+            target.emission = float(source.emission)
+            target.specular = float(source.specular)
+            target.shininess = float(source.shininess)
+            target.reflectance = float(source.reflectance)
+            target.texcoord = int(source.texcoord)
+            target.transparent = 1
+            user_scene.ngeom += 1
+        return int(user_scene.ngeom)
+
+
+class TrackingReferenceViewer(DebugViewer):
+    """Debug viewer augmented with the selected MotionLib reference."""
+
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        layout: JointLayout,
+        trajectory: MotionReferenceTrajectory,
+        *,
+        start_step: int,
+        distance: float,
+        azimuth: float,
+        elevation: float,
+        reference_lateral_offset: float,
+        reference_alpha: float,
+    ):
+        super().__init__(model, data, distance=distance, azimuth=azimuth, elevation=elevation)
+        self.trajectory = trajectory
+        self.start_step = int(start_step)
+        self.reference_visualizer = MotionReferenceVisualizer(
+            model,
+            layout,
+            lateral_offset=reference_lateral_offset,
+            alpha=reference_alpha,
+        )
+        print(
+            f"[viewer] cyan robot=MotionLib reference, lateral_offset={reference_lateral_offset:g}m",
+            flush=True,
+        )
+
+    def sync(self, *, step: int, torque: np.ndarray) -> None:
+        # tracking_z drops reference frame 0 before inference, so after the
+        # first policy step the matching target is start_step + 1.
+        reference_index = self.start_step + int(step)
+        with self.viewer.lock():
+            self.reference_visualizer.update(self.viewer.user_scn, self.trajectory, reference_index)
+        super().sync(step=step, torque=torque)
+
+
 def _motion_reference(
     hv_config: Any,
     *,
@@ -560,6 +713,27 @@ def _motion_reference(
         raise NotImplementedError("Pure MuJoCo inference does not yet support use_contact_in_obs_max=True")
     backward_obs, ref = get_backward_observation(helper_env, motion_id, use_root_height_obs=root_height_obs)
     return motion_lib, backward_obs, ref
+
+
+def _reference_trajectory(ref: dict[str, torch.Tensor]) -> MotionReferenceTrajectory:
+    required = ("ref_body_pos", "ref_body_rots", "dof_pos")
+    missing = [key for key in required if key not in ref]
+    if missing:
+        raise ValueError(f"Motion reference is missing viewer fields: {missing}")
+    root_pos = ref["ref_body_pos"][:, 0].detach().cpu().numpy().astype(np.float64)
+    root_quat_xyzw = ref["ref_body_rots"][:, 0].detach().cpu().numpy().astype(np.float64)
+    dof_pos = ref["dof_pos"].detach().cpu().numpy().astype(np.float64)
+    if root_pos.ndim != 2 or root_pos.shape[1] != 3:
+        raise ValueError(f"Reference root positions must have shape [T, 3], got {root_pos.shape}")
+    if root_quat_xyzw.shape != (root_pos.shape[0], 4):
+        raise ValueError(f"Reference root rotations must have shape [T, 4], got {root_quat_xyzw.shape}")
+    if dof_pos.ndim != 2 or dof_pos.shape[0] != root_pos.shape[0]:
+        raise ValueError(f"Reference dof positions must have shape [T, N], got {dof_pos.shape}")
+    return MotionReferenceTrajectory(
+        root_pos=root_pos,
+        root_quat_wxyz=root_quat_xyzw[:, [3, 0, 1, 2]],
+        dof_pos=dof_pos,
+    )
 
 
 @torch.no_grad()
@@ -639,6 +813,7 @@ def run(args: argparse.Namespace) -> None:
         root_height_obs=bool(run_config["env"].get("root_height_obs", False)),
     )
     del motion_lib
+    reference_trajectory = _reference_trajectory(ref) if args.show_reference_motion else None
     z = _tracking_z(policy, backward_obs, args.device)
     if args.start_step:
         z = z[args.start_step :]
@@ -690,17 +865,29 @@ def run(args: argparse.Namespace) -> None:
         ankle_motor_torque_limit=args.ankle_motor_torque_limit,
     )
 
-    viewer = (
-        None
-        if args.headless
-        else DebugViewer(
+    if args.headless:
+        viewer: DebugViewer | TrackingReferenceViewer | None = None
+    elif reference_trajectory is not None:
+        viewer = TrackingReferenceViewer(
+            model,
+            data,
+            layout,
+            reference_trajectory,
+            start_step=args.start_step,
+            distance=args.camera_distance,
+            azimuth=args.camera_azimuth,
+            elevation=args.camera_elevation,
+            reference_lateral_offset=args.reference_lateral_offset,
+            reference_alpha=args.reference_alpha,
+        )
+    else:
+        viewer = DebugViewer(
             model,
             data,
             distance=args.camera_distance,
             azimuth=args.camera_azimuth,
             elevation=args.camera_elevation,
         )
-    )
     print(
         "[sim2sim] "
         f"physics={physics_hz:g}Hz policy={policy_hz:g}Hz decimation={decimation} "
@@ -798,7 +985,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-distance", type=float, default=3.0)
     parser.add_argument("--camera-azimuth", type=float, default=135.0)
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
+    parser.add_argument("--reference-lateral-offset", type=float, default=1.0)
+    parser.add_argument("--reference-alpha", type=float, default=0.45)
     _add_bool_arg(parser, "--headless", False, "Run without the interactive MuJoCo viewer.")
+    _add_bool_arg(parser, "--show-reference-motion", False, "Show the MotionLib reference as a cyan robot beside the simulation.")
     _add_bool_arg(parser, "--loop", False, "Reset and replay the selected motion continuously.")
     _add_bool_arg(parser, "--realtime", True, "Rate-limit viewer rollout to policy_hz.")
     _add_bool_arg(parser, "--zero-init-velocity", False, "Zero root and joint velocities when resetting.")
@@ -830,6 +1020,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ground-friction must be positive")
     if args.log_every <= 0:
         parser.error("--log-every must be positive")
+    if not math.isfinite(args.reference_lateral_offset):
+        parser.error("--reference-lateral-offset must be finite")
+    if not 0.0 < args.reference_alpha <= 1.0:
+        parser.error("--reference-alpha must be in (0, 1]")
     if args.torque_response_kp < 0.0 or args.torque_response_ki < 0.0:
         parser.error("--torque-response-kp and --torque-response-ki must be nonnegative")
     if args.torque_response_plant_tau_ms <= 0.0:

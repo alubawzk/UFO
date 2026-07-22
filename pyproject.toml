@@ -41,6 +41,7 @@ pico-teleop = [
     "mink>=0.0.13",
     "pyzmq>=26.0.0",
     "qpsolvers[daqp]>=4.8.1",
+    "smplx>=0.1.28",
 ]
 
 [[tool.uv.index]]

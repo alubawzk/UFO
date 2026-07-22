@@ -9,7 +9,8 @@
         <geom material="visualgeom" contype="0" conaffinity="0" group="2" />
       </default>
       <default class="collision">
-        <geom material="collision_material" condim="3" contype="1" conaffinity="1" priority="1" group="1" solref="0.005 1" solimp="0.99 0.999 1e-05" friction="2 0.01 0.01" />
+        <!-- contype=0 disables robot-robot contacts; conaffinity=1 still accepts environment geoms with contype=1. -->
+        <geom material="collision_material" condim="3" contype="0" conaffinity="1" priority="1" group="1" solref="0.005 1" solimp="0.99 0.999 1e-05" friction="2 0.01 0.01" />
       </default>
     </default>
   </default>
@@ -209,8 +210,8 @@
   </actuator>
 
   <contact>
-    <!-- Keep self-collision enabled for non-adjacent links, but exclude every
-         directly connected parent-child pair in the kinematic tree. -->
+    <!-- Retained so changing the collision default back to contype=1 restores
+         non-adjacent self-collision without enabling adjacent-link contacts. -->
     <exclude body1="base_link" body2="imu_link" />
     <exclude body1="base_link" body2="left_hip_pitch_link" />
     <exclude body1="base_link" body2="right_hip_pitch_link" />
