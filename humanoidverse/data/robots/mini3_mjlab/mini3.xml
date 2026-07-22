@@ -9,7 +9,7 @@
         <geom material="visualgeom" contype="0" conaffinity="0" group="2" />
       </default>
       <default class="collision">
-        <geom material="collision_material" condim="3" contype="0" conaffinity="1" priority="1" group="1" solref="0.005 1" solimp="0.99 0.999 1e-05" friction="2 0.01 0.01" />
+        <geom material="collision_material" condim="3" contype="1" conaffinity="1" priority="1" group="1" solref="0.005 1" solimp="0.99 0.999 1e-05" friction="2 0.01 0.01" />
       </default>
     </default>
   </default>
@@ -209,8 +209,36 @@
   </actuator>
 
   <contact>
+    <!-- Keep self-collision enabled for non-adjacent links, but exclude every
+         directly connected parent-child pair in the kinematic tree. -->
+    <exclude body1="base_link" body2="imu_link" />
+    <exclude body1="base_link" body2="left_hip_pitch_link" />
+    <exclude body1="base_link" body2="right_hip_pitch_link" />
     <exclude body1="base_link" body2="waist_yaw_link" />
+
+    <exclude body1="left_hip_pitch_link" body2="left_hip_roll_link" />
+    <exclude body1="left_hip_roll_link" body2="left_hip_yaw_link" />
+    <exclude body1="left_hip_yaw_link" body2="left_knee_pitch_link" />
+    <exclude body1="left_knee_pitch_link" body2="left_ankle_pitch_link" />
+    <exclude body1="left_ankle_pitch_link" body2="left_ankle_roll_link" />
+
+    <exclude body1="right_hip_pitch_link" body2="right_hip_roll_link" />
+    <exclude body1="right_hip_roll_link" body2="right_hip_yaw_link" />
+    <exclude body1="right_hip_yaw_link" body2="right_knee_pitch_link" />
+    <exclude body1="right_knee_pitch_link" body2="right_ankle_pitch_link" />
+    <exclude body1="right_ankle_pitch_link" body2="right_ankle_roll_link" />
+
     <exclude body1="waist_yaw_link" body2="head_link" />
+    <exclude body1="waist_yaw_link" body2="left_shoulder_pitch_link" />
+    <exclude body1="waist_yaw_link" body2="right_shoulder_pitch_link" />
+
+    <exclude body1="left_shoulder_pitch_link" body2="left_shoulder_roll_link" />
+    <exclude body1="left_shoulder_roll_link" body2="left_shoulder_yaw_link" />
+    <exclude body1="left_shoulder_yaw_link" body2="left_elbow_pitch_link" />
+
+    <exclude body1="right_shoulder_pitch_link" body2="right_shoulder_roll_link" />
+    <exclude body1="right_shoulder_roll_link" body2="right_shoulder_yaw_link" />
+    <exclude body1="right_shoulder_yaw_link" body2="right_elbow_pitch_link" />
   </contact>
 
   <sensor>

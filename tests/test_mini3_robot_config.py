@@ -108,6 +108,24 @@ class Mini3RobotConfigTest(unittest.TestCase):
             self.assertAlmostEqual(float(model.dof_frictionloss[dof_id]), expected["friction"])
             self.assertAlmostEqual(float(model.dof_damping[dof_id]), expected["viscous_friction"])
 
+    def test_mjcf_enables_non_adjacent_self_collision_only(self) -> None:
+        root = ET.parse(XML_PATH).getroot()
+        collision_default = root.find("./default/default/default[@class='collision']/geom")
+        self.assertIsNotNone(collision_default)
+        self.assertNotEqual(int(collision_default.attrib["contype"]), 0)
+        self.assertNotEqual(int(collision_default.attrib["conaffinity"]), 0)
+
+        adjacent_pairs = {
+            frozenset((parent.attrib["name"], child.attrib["name"]))
+            for parent in root.findall(".//body")
+            for child in parent.findall("./body")
+        }
+        excluded_pairs = {
+            frozenset((exclude.attrib["body1"], exclude.attrib["body2"]))
+            for exclude in root.findall("./contact/exclude")
+        }
+        self.assertEqual(excluded_pairs, adjacent_pairs)
+
     def test_hydra_config_dimensions_and_order_match_robot_spec(self) -> None:
         cfg = OmegaConf.load(HYDRA_CONFIG).robot
         self.assertEqual(cfg.num_bodies, 24)

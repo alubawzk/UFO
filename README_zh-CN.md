@@ -326,6 +326,15 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference 
   --enable-torque-response true \
   --enable-kt-output-model true \
   --tn-limit-after-response true
+
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/Revise_torque_limit \
+  --data-path humanoidverse/data/lafan1_mini3_ufo/walk1_subject2__clip002.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless false \
+  --loop true \
+  --enable-real-motor false
 ```
 
 纯 MuJoCo 推理默认启用与 Mini3 新训练相同的电机侧模型；参数来自
