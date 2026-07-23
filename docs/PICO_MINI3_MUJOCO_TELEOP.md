@@ -151,6 +151,26 @@ cd /home/amax/Desktop/robot/UFO
   --loop
 ```
 
+如果要使用该 run 的 `exported/FBcprAuxModel.onnx` 和
+`exported/backward_encoder.onnx`，在相同命令中增加 `--use-onnx true`：
+
+```bash
+.venv/bin/python -m humanoidverse.mujoco_pico_teleop \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
+  --pico-npz /home/amax/Desktop/v2/pickup_v2.npz \
+  --device cuda:0 \
+  --use-onnx true \
+  --onnx-provider auto \
+  --loop
+```
+
+默认从 `<model-folder>/exported` 读取 ONNX；只有文件位于其他目录时才需要传
+`--onnx-dir /path/to/exported`。`auto` 会在 ONNX Runtime 包含
+`CUDAExecutionProvider` 且 `--device` 为 CUDA 时使用 GPU，否则使用
+`CPUExecutionProvider`。项目的 `pico-teleop` 可选依赖默认安装 CPU 版
+ONNX Runtime；如需 CUDA provider，应将其替换为与本机 CUDA 兼容的
+`onnxruntime-gpu`。程序启动日志中的 `backend=onnx:...` 会显示实际 provider。
+
 ### 4.4 播放转换后的 MotionLib PKL
 
 `pico_data/pico_v2_mini3.pkl` 已经是 Mini3 MotionLib 格式，不能传给只接收原始

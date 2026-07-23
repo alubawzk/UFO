@@ -1,7 +1,10 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import mujoco
 import numpy as np
@@ -14,6 +17,7 @@ from humanoidverse.mujoco_pico_teleop import (
     LatentSmoother,
     Mini3Reference,
     OnlineMini3ReferenceEncoder,
+    OnnxPolicyRunner,
     PicoNpzSource,
     PicoSmplFrame,
     RetargetReferenceVisualizer,
@@ -323,6 +327,97 @@ class TestLatentSmoother(unittest.TestCase):
 
         self.assertAlmostEqual(torch.linalg.norm(result).item(), 4.0, places=5)
         self.assertGreater(result[0, 1].item(), result[0, 0].item())
+
+
+class TestOnnxPolicyRunner(unittest.TestCase):
+    def test_runs_pruned_backward_inputs_and_metadata_order(self) -> None:
+        class ValueInfo:
+            def __init__(self, name: str, shape: list[int | str]):
+                self.name = name
+                self.shape = shape
+
+        class FakeSession:
+            def __init__(self, path: str, providers: list[str]):
+                self.is_backward = Path(path).name == "backward_encoder.onnx"
+                self.providers = list(providers)
+
+            def get_inputs(self) -> list[ValueInfo]:
+                if self.is_backward:
+                    # last_action is intentionally absent: ONNX export prunes
+                    # inputs unused by this checkpoint's backward filter.
+                    return [ValueInfo("state", ["batch", 3]), ValueInfo("privileged_state", ["batch", 6])]
+                return [ValueInfo("actor_obs", ["batch", 14])]
+
+            def get_outputs(self) -> list[ValueInfo]:
+                return [ValueInfo("z" if self.is_backward else "action", ["batch", 5 if self.is_backward else 2])]
+
+            def get_providers(self) -> list[str]:
+                return self.providers
+
+            def run(self, _outputs: list[str], feed: dict[str, np.ndarray]) -> list[np.ndarray]:
+                if self.is_backward:
+                    self_outer.assertEqual(set(feed), {"state", "privileged_state"})
+                    return [np.full((feed["state"].shape[0], 5), 2.0, dtype=np.float32)]
+                actor_obs = feed["actor_obs"]
+                self_outer.assertEqual(actor_obs.shape, (1, 14))
+                return [actor_obs[:, :2].copy()]
+
+        self_outer = self
+        fake_ort = types.SimpleNamespace(
+            get_available_providers=lambda: ["CPUExecutionProvider"],
+            InferenceSession=FakeSession,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            model_folder = Path(temporary_directory)
+            export_dir = model_folder / "exported"
+            export_dir.mkdir()
+            (export_dir / "TinyPolicy.onnx").write_bytes(b"actor")
+            (export_dir / "backward_encoder.onnx").write_bytes(b"backward")
+            (export_dir / "TinyPolicy.meta.json").write_text(
+                json.dumps(
+                    {
+                        "actor_input_keys": ["state", "last_action", "history_actor"],
+                        "actor_input_dims": {"state": 3, "last_action": 2, "history_actor": 4},
+                        "actor_obs_dim": 14,
+                        "z_dim": 5,
+                        "output_action_dim": 2,
+                        "control_joint_names": ["joint_a", "joint_b"],
+                    }
+                )
+            )
+            checkpoint_config = model_folder / "checkpoint" / "model" / "config.json"
+            checkpoint_config.parent.mkdir(parents=True)
+            checkpoint_config.write_text(json.dumps({"archi": {"norm_z": True}}))
+
+            with mock.patch.dict(sys.modules, {"onnxruntime": fake_ort}):
+                runner = OnnxPolicyRunner(
+                    model_folder,
+                    None,
+                    requested_device="cuda:0",
+                    provider="auto",
+                    control_joint_names=["joint_a", "joint_b"],
+                )
+                latent = runner.encode_reference(
+                    {
+                        "state": torch.ones(1, 3),
+                        "last_action": torch.ones(1, 2),
+                        "privileged_state": torch.ones(1, 6),
+                    }
+                )
+                action = runner.act(
+                    {
+                        "state": torch.tensor([[3.0, 4.0, 5.0]]),
+                        "last_action": torch.ones(1, 2),
+                        "history_actor": torch.ones(1, 4),
+                    },
+                    latent,
+                )
+
+        self.assertEqual(runner.tensor_device, "cpu")
+        self.assertTrue(runner.norm_z)
+        self.assertEqual(runner.backward_input_names, ["state", "privileged_state"])
+        np.testing.assert_array_equal(latent.numpy(), np.full((1, 5), 2.0, dtype=np.float32))
+        np.testing.assert_array_equal(action, [3.0, 4.0])
 
 
 if __name__ == "__main__":

@@ -882,6 +882,198 @@ def _load_policy(model_folder: Path, device: str) -> torch.nn.Module:
     return load_model_from_checkpoint_dir(checkpoint_dir, device=load_device).to(device).eval()
 
 
+class TorchPolicyRunner:
+    """Run both halves of an FB tracking policy with PyTorch."""
+
+    def __init__(self, model_folder: Path, device: str):
+        self.policy = _load_policy(model_folder, device)
+        self.tensor_device = str(device)
+        self.norm_z = bool(getattr(getattr(self.policy.cfg, "archi", None), "norm_z", False))
+        self.description = f"pytorch:{device}"
+
+    @torch.no_grad()
+    def encode_reference(self, backward_obs: dict[str, torch.Tensor] | torch.Tensor) -> torch.Tensor:
+        return self.policy.project_z(self.policy.backward_map(backward_obs))
+
+    @torch.no_grad()
+    def act(self, observation: dict[str, torch.Tensor], latent: torch.Tensor) -> np.ndarray:
+        return self.policy.act(observation, latent, mean=True)[0].detach().cpu().numpy()
+
+
+def _onnx_numpy(value: torch.Tensor | np.ndarray, *, name: str) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    array = np.asarray(value, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(f"ONNX input {name!r} must have shape [batch, dim], got {array.shape}")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"ONNX input {name!r} contains non-finite values")
+    return np.ascontiguousarray(array)
+
+
+def _onnx_static_last_dim(value_info: Any) -> int | None:
+    shape = getattr(value_info, "shape", None)
+    if not shape:
+        return None
+    last_dim = shape[-1]
+    return int(last_dim) if isinstance(last_dim, int) and last_dim > 0 else None
+
+
+class OnnxPolicyRunner:
+    """Run the exported backward encoder and actor with ONNX Runtime."""
+
+    def __init__(
+        self,
+        model_folder: Path,
+        onnx_dir: Path | None,
+        *,
+        requested_device: str,
+        provider: str,
+        control_joint_names: list[str],
+    ):
+        try:
+            import onnxruntime as ort
+        except ModuleNotFoundError as exc:
+            raise ImportError(
+                "ONNX inference requires onnxruntime. Run "
+                "`.venv/bin/python -m pip install onnxruntime` for CPU, or install "
+                "`onnxruntime-gpu` for CUDA."
+            ) from exc
+
+        self.onnx_dir = (model_folder / "exported" if onnx_dir is None else onnx_dir).expanduser().resolve()
+        if not self.onnx_dir.is_dir():
+            raise FileNotFoundError(f"ONNX export directory does not exist: {self.onnx_dir}")
+        metadata_paths = sorted(self.onnx_dir.glob("*.meta.json"))
+        if len(metadata_paths) != 1:
+            raise ValueError(f"Expected exactly one actor *.meta.json in {self.onnx_dir}, found {[path.name for path in metadata_paths]}")
+        self.metadata_path = metadata_paths[0]
+        actor_stem = self.metadata_path.name.removesuffix(".meta.json")
+        self.actor_path = self.onnx_dir / f"{actor_stem}.onnx"
+        self.backward_path = self.onnx_dir / "backward_encoder.onnx"
+        missing = [path for path in (self.actor_path, self.backward_path) if not path.is_file()]
+        if missing:
+            raise FileNotFoundError("Missing exported ONNX model(s): " + ", ".join(str(path) for path in missing))
+
+        metadata = json.loads(self.metadata_path.read_text())
+        self.actor_input_keys = [str(key) for key in metadata["actor_input_keys"]]
+        self.actor_input_dims = {str(key): int(dim) for key, dim in metadata["actor_input_dims"].items()}
+        self.z_dim = int(metadata["z_dim"])
+        self.action_dim = int(metadata["output_action_dim"])
+        expected_joint_names = [str(name) for name in metadata["control_joint_names"]]
+        if expected_joint_names != control_joint_names:
+            raise ValueError(
+                f"ONNX control joint order differs from the selected robot config: onnx={expected_joint_names}, robot={control_joint_names}"
+            )
+        if self.action_dim != len(control_joint_names):
+            raise ValueError(f"ONNX action dim={self.action_dim} does not match robot joint count={len(control_joint_names)}")
+        missing_actor_keys = [key for key in self.actor_input_keys if key not in {"state", "last_action", "history_actor"}]
+        if missing_actor_keys:
+            raise ValueError(f"ONNX actor requires unsupported observation keys: {missing_actor_keys}")
+        actor_input_dim = sum(self.actor_input_dims[key] for key in self.actor_input_keys) + self.z_dim
+        if actor_input_dim != int(metadata["actor_obs_dim"]):
+            raise ValueError(
+                f"ONNX metadata actor dimension mismatch: composed={actor_input_dim}, actor_obs_dim={metadata['actor_obs_dim']}"
+            )
+
+        model_config_path = model_folder / "checkpoint" / "model" / "config.json"
+        if not model_config_path.is_file():
+            raise FileNotFoundError(f"Missing checkpoint model config used to validate ONNX latent behavior: {model_config_path}")
+        model_config = json.loads(model_config_path.read_text())
+        self.norm_z = bool(model_config.get("archi", {}).get("norm_z", False))
+
+        available = list(ort.get_available_providers())
+        requested_provider = str(provider).lower()
+        if requested_provider == "auto":
+            use_cuda = str(requested_device).startswith("cuda") and "CUDAExecutionProvider" in available
+            selected_provider = "CUDAExecutionProvider" if use_cuda else "CPUExecutionProvider"
+        elif requested_provider == "cuda":
+            selected_provider = "CUDAExecutionProvider"
+        elif requested_provider == "cpu":
+            selected_provider = "CPUExecutionProvider"
+        else:
+            raise ValueError(f"Unsupported ONNX provider={provider!r}; expected auto, cpu, or cuda")
+        if selected_provider not in available:
+            raise RuntimeError(f"Requested {selected_provider}, but ONNX Runtime only provides {available}")
+        providers = [selected_provider]
+        if selected_provider != "CPUExecutionProvider" and "CPUExecutionProvider" in available:
+            providers.append("CPUExecutionProvider")
+
+        self.actor_session = ort.InferenceSession(str(self.actor_path), providers=providers)
+        self.backward_session = ort.InferenceSession(str(self.backward_path), providers=providers)
+        actor_inputs = self.actor_session.get_inputs()
+        actor_outputs = self.actor_session.get_outputs()
+        backward_inputs = self.backward_session.get_inputs()
+        backward_outputs = self.backward_session.get_outputs()
+        if len(actor_inputs) != 1 or actor_inputs[0].name != "actor_obs":
+            raise ValueError(f"Actor ONNX must expose one input named 'actor_obs', got {[value.name for value in actor_inputs]}")
+        if len(actor_outputs) != 1:
+            raise ValueError(f"Actor ONNX must expose one output, got {[value.name for value in actor_outputs]}")
+        static_actor_dim = _onnx_static_last_dim(actor_inputs[0])
+        if static_actor_dim is not None and static_actor_dim != actor_input_dim:
+            raise ValueError(f"Actor ONNX input dim={static_actor_dim}, metadata requires {actor_input_dim}")
+        supported_backward_keys = {"state", "last_action", "privileged_state"}
+        self.backward_input_names = [value.name for value in backward_inputs]
+        unsupported_backward_keys = sorted(set(self.backward_input_names).difference(supported_backward_keys))
+        if unsupported_backward_keys or not self.backward_input_names:
+            raise ValueError(f"Backward ONNX has unsupported inputs: {self.backward_input_names}")
+        if len(backward_outputs) != 1:
+            raise ValueError(f"Backward ONNX must expose one output, got {[value.name for value in backward_outputs]}")
+
+        self.actor_input_name = actor_inputs[0].name
+        self.actor_output_name = actor_outputs[0].name
+        self.backward_output_name = backward_outputs[0].name
+        self.backward_input_dims = {value.name: _onnx_static_last_dim(value) for value in backward_inputs}
+        self.tensor_device = "cpu"
+        active_provider = self.actor_session.get_providers()[0]
+        self.description = f"onnx:{active_provider} dir={self.onnx_dir}"
+
+    def encode_reference(self, backward_obs: dict[str, torch.Tensor] | torch.Tensor) -> torch.Tensor:
+        if not isinstance(backward_obs, dict):
+            raise TypeError("Backward ONNX requires a dictionary observation")
+        feed: dict[str, np.ndarray] = {}
+        for name in self.backward_input_names:
+            if name not in backward_obs:
+                raise KeyError(f"Backward observation is missing ONNX input {name!r}")
+            value = _onnx_numpy(backward_obs[name], name=name)
+            expected_dim = self.backward_input_dims[name]
+            if expected_dim is not None and value.shape[1] != expected_dim:
+                raise ValueError(f"Backward ONNX input {name!r} expects dim={expected_dim}, got {value.shape[1]}")
+            feed[name] = value
+        latent = np.asarray(
+            self.backward_session.run([self.backward_output_name], feed)[0],
+            dtype=np.float32,
+        )
+        if latent.ndim != 2 or latent.shape[1] != self.z_dim or not np.all(np.isfinite(latent)):
+            raise ValueError(f"Backward ONNX returned invalid latent shape={latent.shape}, expected [batch, {self.z_dim}]")
+        return torch.from_numpy(np.ascontiguousarray(latent))
+
+    def act(self, observation: dict[str, torch.Tensor], latent: torch.Tensor) -> np.ndarray:
+        actor_parts: list[np.ndarray] = []
+        batch_size: int | None = None
+        for key in self.actor_input_keys:
+            if key not in observation:
+                raise KeyError(f"Actor observation is missing ONNX input component {key!r}")
+            value = _onnx_numpy(observation[key], name=key)
+            expected_dim = self.actor_input_dims[key]
+            if value.shape[1] != expected_dim:
+                raise ValueError(f"Actor observation {key!r} expects dim={expected_dim}, got {value.shape[1]}")
+            batch_size = value.shape[0] if batch_size is None else batch_size
+            if value.shape[0] != batch_size:
+                raise ValueError("ONNX actor observation components have different batch sizes")
+            actor_parts.append(value)
+        latent_array = _onnx_numpy(latent, name="z")
+        if latent_array.shape[1] != self.z_dim or (batch_size is not None and latent_array.shape[0] != batch_size):
+            raise ValueError(f"ONNX actor latent must have shape [{batch_size}, {self.z_dim}], got {latent_array.shape}")
+        actor_obs = np.ascontiguousarray(np.concatenate((*actor_parts, latent_array), axis=-1), dtype=np.float32)
+        action = np.asarray(
+            self.actor_session.run([self.actor_output_name], {self.actor_input_name: actor_obs})[0],
+            dtype=np.float32,
+        )
+        if action.ndim != 2 or action.shape != (actor_obs.shape[0], self.action_dim) or not np.all(np.isfinite(action)):
+            raise ValueError(f"Actor ONNX returned invalid action shape={action.shape}, expected [{actor_obs.shape[0]}, {self.action_dim}]")
+        return action[0].copy()
+
+
 def run(args: argparse.Namespace) -> None:
     model_folder = args.model_folder.expanduser().resolve()
     run_config_path = model_folder / "config.json"
@@ -931,7 +1123,17 @@ def run(args: argparse.Namespace) -> None:
         smplx_device=args.smplx_device or args.device,
         verbose=args.joyin_verbose,
     )
-    policy = _load_policy(model_folder, args.device)
+    policy_runner: TorchPolicyRunner | OnnxPolicyRunner
+    if args.use_onnx:
+        policy_runner = OnnxPolicyRunner(
+            model_folder,
+            args.onnx_dir,
+            requested_device=args.device,
+            provider=args.onnx_provider,
+            control_joint_names=joint_names,
+        )
+    else:
+        policy_runner = TorchPolicyRunner(model_folder, args.device)
     body_names = [str(name) for name in robot_training["robot"]["body_names"]]
     reference_encoder = OnlineMini3ReferenceEncoder(
         xml_path,
@@ -939,12 +1141,11 @@ def run(args: argparse.Namespace) -> None:
         body_names,
         robot_training["default_joint_angles"],
         hv_config,
-        device=args.device,
+        device=policy_runner.tensor_device,
         dt=policy_dt,
         root_height_obs=bool(run_config["env"].get("root_height_obs", False)),
     )
-    norm_z = bool(getattr(getattr(policy.cfg, "archi", None), "norm_z", False))
-    latent_smoother = LatentSmoother(args.latent_window, args.latent_gamma, renormalize=norm_z)
+    latent_smoother = LatentSmoother(args.latent_window, args.latent_gamma, renormalize=policy_runner.norm_z)
 
     model, layout = _build_mujoco_model(
         xml_path,
@@ -1018,7 +1219,8 @@ def run(args: argparse.Namespace) -> None:
     print(
         "[pico-teleop] "
         f"source={source_name} joyin={retargeter.joyin_root} smplx={retargeter.smplx_device} physics={physics_hz:g}Hz "
-        f"policy={policy_hz:g}Hz latent_smoothing={args.latent_window}@{args.latent_gamma:g}",
+        f"policy={policy_hz:g}Hz backend={policy_runner.description} "
+        f"latent_smoothing={args.latent_window}@{args.latent_gamma:g}",
         flush=True,
     )
     print(
@@ -1038,8 +1240,7 @@ def run(args: argparse.Namespace) -> None:
         raise TimeoutError(f"No PICO pose received within {args.connect_timeout_ms} ms")
     first_reference = reference_grounder.apply(retargeter.retarget(first_frame))
     first_backward_obs = reference_encoder.backward_observation(first_reference)
-    with torch.no_grad():
-        current_z = latent_smoother.update(policy.project_z(policy.backward_map(first_backward_obs)))
+    current_z = latent_smoother.update(policy_runner.encode_reference(first_backward_obs))
 
     latest_reference = first_reference
     previous_frame_timestamp = float(first_frame.timestamp)
@@ -1054,7 +1255,7 @@ def run(args: argparse.Namespace) -> None:
         )
         mujoco.mj_forward(model, data)
         controller.reset()
-        return controller.observation(args.device)
+        return controller.observation(policy_runner.tensor_device)
 
     observation = reset_simulation()
     step = 0
@@ -1083,8 +1284,7 @@ def run(args: argparse.Namespace) -> None:
                 retarget_started = time.perf_counter()
                 latest_reference = reference_grounder.apply(retargeter.retarget(frame))
                 backward_obs = reference_encoder.backward_observation(latest_reference, sample_dt=sample_dt)
-                with torch.no_grad():
-                    current_z = latent_smoother.update(policy.project_z(policy.backward_map(backward_obs)))
+                current_z = latent_smoother.update(policy_runner.encode_reference(backward_obs))
                 if frame.sequence_reset and not source.is_live:
                     observation = reset_simulation()
                 retarget_ms = (time.perf_counter() - retarget_started) * 1000.0
@@ -1095,12 +1295,11 @@ def run(args: argparse.Namespace) -> None:
             elif source.is_live and time.monotonic() - last_live_frame_time > args.max_pico_stale_seconds:
                 raise TimeoutError(f"PICO stream has been stale for more than {args.max_pico_stale_seconds:g}s; stopping simulation")
 
-            with torch.no_grad():
-                action = policy.act(observation, current_z, mean=True)[0].detach().cpu().numpy()
+            action = policy_runner.act(observation, current_z)
             controller.set_policy_action(action)
             for _ in range(decimation):
                 controller.physics_step()
-            observation = controller.observation(args.device)
+            observation = controller.observation(policy_runner.tensor_device)
             step += 1
 
             if viewer is not None:
@@ -1139,7 +1338,19 @@ def parse_args() -> argparse.Namespace:
         help="Integrated pico_sim2sim asset root; normally does not need to be changed.",
     )
     parser.add_argument("--robot-config", type=Path, default=Path(DEFAULT_ROBOT_CONFIG))
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--device", default="cuda:0", help="PyTorch policy device, and preferred provider/device for ONNX and SMPL-X.")
+    parser.add_argument(
+        "--onnx-dir",
+        type=Path,
+        default=None,
+        help="Directory containing actor *.onnx, *.meta.json and backward_encoder.onnx; defaults to MODEL_FOLDER/exported.",
+    )
+    parser.add_argument(
+        "--onnx-provider",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="ONNX Runtime execution provider. auto prefers CUDA when --device is CUDA and the provider is installed.",
+    )
     parser.add_argument(
         "--smplx-device",
         default=None,
@@ -1178,6 +1389,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joyin-posture-cost", type=float, default=0.0)
     parser.add_argument("--latent-window", type=int, default=3)
     parser.add_argument("--latent-gamma", type=float, default=0.8)
+    _add_bool_arg(
+        parser,
+        "--use-onnx",
+        False,
+        "Use the exported backward encoder and actor through ONNX Runtime instead of loading the PyTorch checkpoint.",
+    )
     _add_bool_arg(parser, "--headless", False, "Run without the interactive MuJoCo viewer.")
     _add_bool_arg(parser, "--show-retarget-reference", True, "Show the JOYIn Mini3 reference beside the simulated robot.")
     _add_bool_arg(
@@ -1231,6 +1448,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("JOYIn damping/max-iter must be positive and posture-cost nonnegative")
     if args.latent_window <= 0 or not 0.0 < args.latent_gamma <= 1.0:
         parser.error("--latent-window must be positive and --latent-gamma must be in (0, 1]")
+    if args.onnx_dir is not None and not args.use_onnx:
+        parser.error("--onnx-dir requires --use-onnx true")
     if args.torque_response_kp < 0.0 or args.torque_response_ki < 0.0:
         parser.error("--torque-response-kp and --torque-response-ki must be nonnegative")
     if args.torque_response_plant_tau_ms <= 0.0 or args.torque_response_delay_steps < 0.0:

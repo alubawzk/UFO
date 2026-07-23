@@ -39,6 +39,7 @@ dependencies = [
 pico-teleop = [
     "loop-rate-limiters>=1.1.0",
     "mink>=0.0.13",
+    "onnxruntime>=1.21.0",
     "pybind11>=2.13.0",
     "pyzmq>=26.0.0",
     "qpsolvers[daqp]>=4.8.1",

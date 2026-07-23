@@ -165,7 +165,7 @@ uv run python -m humanoidverse.tracking_inference \
 
 CUDA_VISIBLE_DEVICES=0 \
 uv run python -m humanoidverse.tracking_inference \
-  --model-folder runs/ufo_fb_lafan1_mini3_7gpu_ReviseFeetRoll_AddJointParams_LieDown_Delay \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
   --data-path humanoidverse/data/lafan1_mini3_ufo/fallAndGetUp1_subject1__clip004.pkl \
   --robot-config configs/robots/mini3.yaml \
   --device cuda:0 \
