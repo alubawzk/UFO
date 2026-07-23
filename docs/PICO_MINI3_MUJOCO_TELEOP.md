@@ -125,7 +125,7 @@ uv sync --extra pico-teleop
 cd /home/amax/Desktop/robot/UFO
 
 .venv/bin/python -m humanoidverse.mujoco_pico_teleop \
-  --model-folder runs/Revise_torque_limit \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
   --pico-npz /home/amax/Desktop/v2/walking_v2.npz \
   --device cuda:0 \
   --loop
@@ -135,7 +135,7 @@ cd /home/amax/Desktop/robot/UFO
 
 ```bash
 .venv/bin/python -m humanoidverse.mujoco_pico_teleop \
-  --model-folder runs/Revise_torque_limit \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
   --pico-npz /home/amax/Desktop/v2/running_v2.npz \
   --device cuda:0 \
   --loop
@@ -145,13 +145,45 @@ cd /home/amax/Desktop/robot/UFO
 
 ```bash
 .venv/bin/python -m humanoidverse.mujoco_pico_teleop \
-  --model-folder runs/Revise_torque_limit \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
   --pico-npz /home/amax/Desktop/v2/pickup_v2.npz \
   --device cuda:0 \
   --loop
 ```
 
-### 4.4 无界面快速检查
+### 4.4 播放转换后的 MotionLib PKL
+
+`pico_data/pico_v2_mini3.pkl` 已经是 Mini3 MotionLib 格式，不能传给只接收原始
+PICO/Sonic NPZ 的 `mujoco_pico_teleop --pico-npz`。使用下面的命令播放其中的
+walking，并在实际机器人旁显示青色 reference motion：
+
+```bash
+.venv/bin/python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
+  --data-path pico_data/pico_v2_mini3.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --motion-id 2 \
+  --loop true \
+  --show-reference-motion true \
+  --reference-lateral-offset 1.0 \
+  --reference-alpha 0.45 \
+  --enable-real-motor true \
+  --enable-tn-torque-limit true \
+  --enable-torque-response true \
+  --enable-kt-output-model true \
+  --tn-limit-after-response true
+```
+
+该文件包含 3 条 motion：
+
+| `--motion-id` | motion key | 帧数 |
+| ---: | --- | ---: |
+| `0` | `pickup_v2` | 466 |
+| `1` | `running_v2` | 462 |
+| `2` | `walking_v2` | 462 |
+
+### 4.5 无界面快速检查
 
 下面的命令适合检查数据、JOYIn、backward encoder 和 policy 是否能完整运行：
 
@@ -213,10 +245,19 @@ python -m humanoidverse.mujoco_pico_teleop \
   --connect-timeout-ms 60000 \
   --auto-ground-retarget-reference true \
   --retarget-ground-height 0.0 \
-  --root-z-offset 0.02
+  --root-z-offset 0.02 \
+  --enable-real-motor true \
+  --enable-tn-torque-limit true \
+  --enable-torque-response true \
+  --enable-kt-output-model true \
+  --tn-limit-after-response true
 ```
 
-其中自动落地会根据第一帧 Mini3 reference 的足底最低点计算固定 z offset；`--root-z-offset 0.02` 会在自动落地后把实际仿真机器人额外抬高 `2 cm`。若不需要额外抬高，将它改为 `0.0`。
+其中自动落地会根据第一帧 Mini3 reference 的足底最低点计算固定 z offset；`--root-z-offset 0.02`
+会在自动落地后把实际仿真机器人额外抬高 `2 cm`。若不需要额外抬高，将它改为 `0.0`。
+最后五个参数显式启用与 Mini3 real-actuator 训练一致的电机链路，包括 4340P/4310P T-N
+包络、PI 电流环与一阶力矩响应、KT 输出映射以及响应后的二次 T-N 限幅。这些选项当前默认均为
+`true`，写在命令中是为了避免后续默认值变化造成推理动力学不一致。
 
 如果 PICO streamer 运行在另一台机器上，将地址改为：
 
