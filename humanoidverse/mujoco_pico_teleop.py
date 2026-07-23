@@ -6,18 +6,17 @@ without changing that offline tracking program.
 
 Two PICO sources are supported:
 
-* Live Sonic pose messages from ``pico_manager_thread_server.py`` (ZMQ port
+* Live Sonic pose messages from :mod:`pico_sim2sim.sonic_server` (ZMQ port
   5556 by default).
 * Recorded PICO v2 clips containing ``sonic_smpl_*`` arrays, such as
   ``walking_v2.npz`` and ``running_v2.npz``.
 
-JOYIn-Retarget is loaded from ``--joyin-root`` at runtime.  Each Sonic frame
-is first restored to standard SMPL-X parameters and run through JOYIn's
-SMPL-X body model and ``get_smplx_data`` helper.  JOYIn's
-``smplx_to_mini3`` configuration then converts the resulting human pose to a
-Mini3 free-base qpos.  A separate Mini3 MuJoCo model computes the same
-body-space backward observation used during UFO training, and the policy
-tracks the resulting latent in the pure MuJoCo controller.
+Each Sonic frame is first restored to standard SMPL-X parameters and run
+through the real neutral SMPL-X body model integrated in :mod:`pico_sim2sim`.
+JOYIn's integrated ``smplx_to_mini3`` configuration then converts the
+resulting human pose to a Mini3 free-base qpos.  A separate Mini3 MuJoCo model
+computes the same body-space backward observation used during UFO training,
+and the policy tracks the resulting latent in the pure MuJoCo controller.
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -55,8 +53,10 @@ from humanoidverse.mujoco_tracking_inference import (
 from humanoidverse.utils.reference_observations import reference_base_ang_vel
 from humanoidverse.utils.robot_spec import resolve_robot_config_path
 from humanoidverse.utils.torch_utils import quat_rotate_inverse
+from pico_sim2sim.joyin import GeneralMotionRetargeting
+from pico_sim2sim.smplx_model import NeutralSmplxBodyModel
 
-DEFAULT_JOYIN_ROOT = Path("/home/amax/Desktop/robot/JOYIn-Retarget")
+DEFAULT_JOYIN_ROOT = Path(__file__).resolve().parents[1] / "pico_sim2sim"
 DEFAULT_PICO_ENDPOINT = "tcp://127.0.0.1:5556"
 SONIC_HEADER_SIZE = 1280
 SMPLX_NUM_BETAS = 16
@@ -371,7 +371,7 @@ def _model_joint_names(model: mujoco.MjModel) -> list[str]:
 
 
 class JoyInMini3Retargeter:
-    """Run Sonic through JOYIn's native SMPL-X-to-Mini3 pipeline."""
+    """Run Sonic through the integrated JOYIn SMPL-X-to-Mini3 pipeline."""
 
     def __init__(
         self,
@@ -390,47 +390,21 @@ class JoyInMini3Retargeter:
         verbose: bool,
     ):
         self.joyin_root = joyin_root.expanduser().resolve()
-        package = self.joyin_root / "general_motion_retargeting"
-        if not package.is_dir():
-            raise FileNotFoundError(f"JOYIn package not found under: {self.joyin_root}")
-        joyin_path = str(self.joyin_root)
-        if joyin_path not in sys.path:
-            sys.path.insert(0, joyin_path)
-        try:
-            import smplx
-            from general_motion_retargeting import GeneralMotionRetargeting
-            from general_motion_retargeting.utils.smpl import get_smplx_data
-        except ImportError as exc:
-            raise ImportError(
-                "Cannot import the JOYIn SMPL-X pipeline. Install the project's pico-teleop extra so smplx, mink, and "
-                "qpsolvers[daqp] are available"
-            ) from exc
-
-        self.smplx_model_file = self.joyin_root / "assets" / "body_models" / "smplx" / "SMPLX_NEUTRAL.pkl"
-        if not self.smplx_model_file.is_file():
-            raise FileNotFoundError(f"JOYIn neutral SMPL-X body model not found: {self.smplx_model_file}")
-        self.smplx_model = smplx.create(
-            str(self.smplx_model_file.parent.parent),
-            model_type="smplx",
-            gender="neutral",
-            ext="pkl",
-            num_betas=SMPLX_NUM_BETAS,
-            use_pca=False,
-            batch_size=1,
-        )
-        self.smplx_device = torch.device(smplx_device)
-        self.smplx_model = self.smplx_model.to(self.smplx_device).eval()
-        self._joyin_smplx_model_view = SimpleNamespace(parents=self.smplx_model.parents.detach().cpu())
-        self.get_smplx_data = get_smplx_data
+        joyin_assets = self.joyin_root / "joyin"
+        robot_xml = joyin_assets / "mini3_ik.xml"
+        ik_config = joyin_assets / "smplx_to_mini3.json"
+        missing_assets = [path for path in (robot_xml, ik_config) if not path.is_file()]
+        if missing_assets:
+            raise FileNotFoundError("Integrated JOYIn assets are missing: " + ", ".join(str(path) for path in missing_assets))
+        self.smplx_model_file = self.joyin_root / "smplx" / "SMPLX_NEUTRAL.pkl"
+        self.smplx_model = NeutralSmplxBodyModel(self.smplx_model_file, device=smplx_device)
+        self.smplx_device = str(self.smplx_model.device)
         self.smplx_betas = np.zeros(SMPLX_NUM_BETAS, dtype=np.float32)
         # This is the same neutral-shape fallback used by JOYIn's
         # load_smplx_file() when beta[0] is zero.
         self.smplx_human_height = 1.66 + 0.1 * float(self.smplx_betas[0])
         resolved_human_height = self.smplx_human_height if actual_human_height is None else float(actual_human_height)
         self.actual_human_height = resolved_human_height
-        self._zero_hand_pose = torch.zeros(1, 45, device=self.smplx_device, dtype=torch.float32)
-        self._zero_face_pose = torch.zeros(1, 3, device=self.smplx_device, dtype=torch.float32)
-
         self.retargeter = GeneralMotionRetargeting(
             src_human="smplx",
             tgt_robot="mini3",
@@ -442,6 +416,8 @@ class JoyInMini3Retargeter:
             posture_cost=float(posture_cost),
             ik_dt=float(ik_dt),
             max_iter=int(max_iter),
+            robot_xml=robot_xml,
+            ik_config=ik_config,
         )
         joyin_names = _model_joint_names(self.retargeter.model)
         missing = sorted(set(control_joint_names).difference(joyin_names))
@@ -458,34 +434,12 @@ class JoyInMini3Retargeter:
 
     def _smplx_human_pose(self, frame: PicoSmplFrame) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         parameters = sonic_frame_to_smplx_parameters(frame, betas=self.smplx_betas)
-        smplx_data = {
-            "pose_body": parameters.pose_body.reshape(1, 63),
-            "root_orient": parameters.root_orient.reshape(1, 3),
-            "trans": parameters.trans.reshape(1, 3),
-            "betas": parameters.betas,
-        }
-        with torch.inference_mode():
-            smplx_output = self.smplx_model(
-                betas=torch.as_tensor(smplx_data["betas"], device=self.smplx_device, dtype=torch.float32).reshape(1, SMPLX_NUM_BETAS),
-                global_orient=torch.as_tensor(smplx_data["root_orient"], device=self.smplx_device, dtype=torch.float32),
-                body_pose=torch.as_tensor(smplx_data["pose_body"], device=self.smplx_device, dtype=torch.float32),
-                transl=torch.as_tensor(smplx_data["trans"], device=self.smplx_device, dtype=torch.float32),
-                left_hand_pose=self._zero_hand_pose,
-                right_hand_pose=self._zero_hand_pose,
-                jaw_pose=self._zero_face_pose,
-                leye_pose=self._zero_face_pose,
-                reye_pose=self._zero_face_pose,
-                return_full_pose=True,
-            )
-        # JOYIn's get_smplx_data() converts these tensors with NumPy/SciPy, so
-        # copy only its three required outputs back to CPU after an optional
-        # CUDA body-model forward pass.
-        joyin_output = SimpleNamespace(
-            global_orient=smplx_output.global_orient.detach().cpu(),
-            full_pose=smplx_output.full_pose.detach().cpu(),
-            joints=smplx_output.joints.detach().cpu(),
+        return self.smplx_model.joyin_data(
+            root_orient=parameters.root_orient,
+            pose_body=parameters.pose_body,
+            trans=parameters.trans,
+            betas=parameters.betas,
         )
-        return self.get_smplx_data(smplx_data, self._joyin_smplx_model_view, joyin_output, 0)
 
     def retarget(self, frame: PicoSmplFrame) -> Mini3Reference:
         human_pose = self._smplx_human_pose(frame)
@@ -1070,7 +1024,7 @@ def run(args: argparse.Namespace) -> None:
     print(
         "[pico-teleop] "
         f"smplx_model={retargeter.smplx_model_file} betas=neutral-zero[{SMPLX_NUM_BETAS}] "
-        f"human_height={retargeter.actual_human_height:g}m pipeline=JOYIn:get_smplx_data->GeneralMotionRetargeting",
+        f"human_height={retargeter.actual_human_height:g}m pipeline=SMPLX_NEUTRAL.pkl->JOYIn:GeneralMotionRetargeting",
         flush=True,
     )
     if source.is_live:
@@ -1178,10 +1132,19 @@ def parse_args() -> argparse.Namespace:
     source_group = parser.add_mutually_exclusive_group()
     source_group.add_argument("--pico-npz", type=Path, default=None, help="Recorded PICO v2 NPZ; omit for live ZMQ input.")
     source_group.add_argument("--pico-endpoint", default=DEFAULT_PICO_ENDPOINT, help="Live Sonic pose PUB endpoint.")
-    parser.add_argument("--joyin-root", type=Path, default=DEFAULT_JOYIN_ROOT)
+    parser.add_argument(
+        "--joyin-root",
+        type=Path,
+        default=DEFAULT_JOYIN_ROOT,
+        help="Integrated pico_sim2sim asset root; normally does not need to be changed.",
+    )
     parser.add_argument("--robot-config", type=Path, default=Path(DEFAULT_ROBOT_CONFIG))
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--smplx-device", default=None, help="SMPL-X body-model device; defaults to --device.")
+    parser.add_argument(
+        "--smplx-device",
+        default=None,
+        help="Device for SMPL-X forward inference; defaults to --device.",
+    )
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--connect-timeout-ms", type=int, default=10000)

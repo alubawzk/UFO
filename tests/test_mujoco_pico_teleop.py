@@ -24,6 +24,19 @@ from humanoidverse.mujoco_pico_teleop import (
 )
 from humanoidverse.mujoco_tracking_inference import _joint_layout
 from humanoidverse.utils.robot_spec import load_robot_spec
+from pico_sim2sim.joyin import GeneralMotionRetargeting
+from pico_sim2sim.smplx_model import NeutralSmplxBodyModel
+from pico_sim2sim.sonic_protocol import pack_pose_message
+from pico_sim2sim.sonic_server import XRT_JOINT_FRAME_CORRECTION, Y_UP_TO_Z_UP, body_poses_to_sonic
+
+_TEST_SMPLX_MODEL: NeutralSmplxBodyModel | None = None
+
+
+def _test_smplx_model() -> NeutralSmplxBodyModel:
+    global _TEST_SMPLX_MODEL
+    if _TEST_SMPLX_MODEL is None:
+        _TEST_SMPLX_MODEL = NeutralSmplxBodyModel(device="cpu")
+    return _TEST_SMPLX_MODEL
 
 
 class TestSonicWireFormat(unittest.TestCase):
@@ -42,6 +55,18 @@ class TestSonicWireFormat(unittest.TestCase):
         np.testing.assert_array_equal(decoded["smpl_pose"], pose)
         np.testing.assert_array_equal(decoded["frame_index"], frame_index)
         self.assertEqual(decoded["version"], 3)
+
+    def test_integrated_publisher_codec_round_trip(self) -> None:
+        payload = {
+            "smpl_pose": np.arange(2 * 21 * 3, dtype=np.float32).reshape(2, 21, 3),
+            "body_quat_w": np.ones((2, 4), dtype=np.float32),
+            "frame_index": np.asarray([4, 5], dtype=np.int64),
+        }
+
+        decoded = unpack_sonic_pose_message(pack_pose_message(payload))
+
+        for name, expected in payload.items():
+            np.testing.assert_array_equal(decoded[name], expected)
 
     def test_rejects_truncated_payload(self) -> None:
         fields = [{"name": "value", "dtype": "f32", "shape": [2]}]
@@ -92,6 +117,55 @@ class TestSonicSmplxAdapter(unittest.TestCase):
         np.testing.assert_array_equal(first.pose_body, second.pose_body)
         np.testing.assert_array_equal(first.root_orient, second.root_orient)
         np.testing.assert_array_equal(first.trans, second.trans)
+
+    def test_integrated_xrt_conversion_matches_sonic_root_convention(self) -> None:
+        body_poses = np.zeros((24, 7), dtype=np.float64)
+        body_poses[:, 6] = 1.0
+
+        pose, joints, sonic_root = body_poses_to_sonic(body_poses, _test_smplx_model())
+        parameters = sonic_frame_to_smplx_parameters(
+            PicoSmplFrame(
+                smpl_pose=pose,
+                smpl_joints=joints,
+                root_quat_wxyz=sonic_root,
+                root_translation=np.zeros(3),
+                timestamp=0.0,
+            )
+        )
+
+        expected_root = Y_UP_TO_Z_UP * XRT_JOINT_FRAME_CORRECTION
+        np.testing.assert_allclose(pose, 0.0, atol=1.0e-7)
+        self.assertEqual(joints.shape, (24, 3))
+        np.testing.assert_allclose(
+            Rotation.from_rotvec(parameters.root_orient).as_matrix(),
+            expected_root.as_matrix(),
+            atol=1.0e-7,
+        )
+
+
+class TestIntegratedJoyIn(unittest.TestCase):
+    def test_real_neutral_smplx_and_mini3_retarget(self) -> None:
+        body = _test_smplx_model().forward(
+            root_orient=np.zeros(3),
+            pose_body=np.zeros((21, 3)),
+            trans=np.zeros(3),
+        )
+        self.assertEqual(body.positions.shape, (22, 3))
+        self.assertEqual(body.sonic_positions.shape, (24, 3))
+        self.assertTrue(np.all(np.isfinite(body.positions)))
+        np.testing.assert_allclose(body.rotations_wxyz[:, 0], 1.0, atol=1.0e-7)
+        np.testing.assert_allclose(body.rotations_wxyz[:, 1:], 0.0, atol=1.0e-7)
+
+        retargeter = GeneralMotionRetargeting(
+            verbose=False,
+            use_velocity_limit=False,
+            ik_dt=0.02,
+            max_iter=1,
+        )
+        qpos = retargeter.retarget(body.as_joyin_data(), offset_to_ground=True)
+
+        self.assertEqual(qpos.shape, (28,))
+        self.assertTrue(np.all(np.isfinite(qpos)))
 
 
 class TestPicoNpzSource(unittest.TestCase):

@@ -3,3 +3,6 @@ humanoidverse/data/**/*.pkl filter=lfs diff=lfs merge=lfs -text
 
 humanoidverse/data/lafan_29dof.pkl filter=lfs diff=lfs merge=lfs -text
 humanoidverse/data/lafan_29dof_10s-clipped.pkl filter=lfs diff=lfs merge=lfs -text
+
+# The licensed SMPL-X body model is too large for regular Git objects.
+pico_sim2sim/smplx/*.pkl filter=lfs diff=lfs merge=lfs -text

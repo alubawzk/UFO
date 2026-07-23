@@ -1,0 +1,122 @@
+<mujoco model="mini3_joyin_ik">
+  <compiler angle="radian"/>
+  <option timestep="0.001"/>
+  <default>
+    <joint armature="0.01"/>
+  </default>
+  <worldbody>
+    <body name="base_link" pos="0 0 0.46305">
+      <freejoint name="floating_base"/>
+      <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+      <body name="imu_link" pos="0 0 -0.044"/>
+      <body name="left_hip_pitch_link" pos="0 0.05775 0">
+        <joint name="left_hip_pitch_joint" axis="0 1 0" range="-1.8326 1.8326" armature="0.0814"/>
+        <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+        <body name="left_hip_roll_link" pos="0.018 -0.001 -0.064">
+          <joint name="left_hip_roll_joint" axis="1 0 0" range="-0.8727 1.3963" armature="0.0814"/>
+          <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+          <body name="left_hip_yaw_link" pos="-0.0173 0 -0.08905">
+            <joint name="left_hip_yaw_joint" axis="0 0 1" range="-1.9199 1.9199" armature="0.0723"/>
+            <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+            <body name="left_knee_pitch_link" pos="-0.0079999 0.01605 -0.068">
+              <joint name="left_knee_pitch_joint" axis="0 1 0" range="-0.3491 1.9199" armature="0.0723"/>
+              <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+              <body name="left_ankle_pitch_link" pos="0.0040003 -0.015 -0.214">
+                <joint name="left_ankle_pitch_joint" axis="0 1 0" range="-0.5236 0.5236"/>
+                <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+                <body name="left_ankle_roll_link">
+                  <joint name="left_ankle_roll_joint" axis="1 0 0" range="-0.2618 0.2618"/>
+                  <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_hip_pitch_link" pos="0 -0.05775 0">
+        <joint name="right_hip_pitch_joint" axis="0 1 0" range="-1.8326 1.8326" armature="0.0814"/>
+        <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+        <body name="right_hip_roll_link" pos="0.018 0.001 -0.064">
+          <joint name="right_hip_roll_joint" axis="1 0 0" range="-1.3963 0.8727" armature="0.0814"/>
+          <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+          <body name="right_hip_yaw_link" pos="-0.0173 0 -0.08905">
+            <joint name="right_hip_yaw_joint" axis="0 0 1" range="-1.9199 1.9199" armature="0.0723"/>
+            <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+            <body name="right_knee_pitch_link" pos="-0.0079999 -0.01605 -0.068">
+              <joint name="right_knee_pitch_joint" axis="0 1 0" range="-0.3491 1.9199" armature="0.0723"/>
+              <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+              <body name="right_ankle_pitch_link" pos="0.0040003 0.015 -0.214">
+                <joint name="right_ankle_pitch_joint" axis="0 1 0" range="-0.5236 0.5236"/>
+                <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+                <body name="right_ankle_roll_link">
+                  <joint name="right_ankle_roll_joint" axis="1 0 0" range="-0.2618 0.2618"/>
+                  <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="waist_yaw_link" pos="-0.022 0 0.0385">
+        <joint name="waist_yaw_joint" axis="0 0 1" range="-2.618 2.618" armature="0.0814"/>
+        <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+        <body name="head_link" pos="0.016552 0 0.27947"/>
+        <body name="left_shoulder_pitch_link" pos="-0.008007 0.06505 0.19505">
+          <joint name="left_shoulder_pitch_joint" axis="0 1 0" range="-3.4907 1.0472" armature="0.0019"/>
+          <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+          <body name="left_shoulder_roll_link" pos="0.020507 0.035007 0">
+            <joint name="left_shoulder_roll_joint" axis="1 0 0" range="-0.1745 3.1416" armature="0.0019"/>
+            <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+            <body name="left_shoulder_yaw_link" pos="-0.020507 0 -0.086048">
+              <joint name="left_shoulder_yaw_joint" axis="0 0 1" range="-1.5708 1.5708" armature="0.0019"/>
+              <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+              <body name="left_elbow_pitch_link" pos="0.0000128 0.018503 -0.051005">
+                <joint name="left_elbow_pitch_joint" axis="0 1 0" range="-0.576 3.8397" armature="0.0019"/>
+                <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+              </body>
+            </body>
+          </body>
+        </body>
+        <body name="right_shoulder_pitch_link" pos="-0.0079971 -0.06505 0.19504">
+          <joint name="right_shoulder_pitch_joint" axis="0 1 0" range="-3.4907 1.0472" armature="0.0019"/>
+          <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+          <body name="right_shoulder_roll_link" pos="0.020497 -0.034993 0">
+            <joint name="right_shoulder_roll_joint" axis="1 0 0" range="-3.1416 0.1745" armature="0.0019"/>
+            <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+            <body name="right_shoulder_yaw_link" pos="-0.020507 0 -0.086048">
+              <joint name="right_shoulder_yaw_joint" axis="0 0 1" range="-1.5708 1.5708" armature="0.0019"/>
+              <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+              <body name="right_elbow_pitch_link" pos="0 -0.018497 -0.051007">
+                <joint name="right_elbow_pitch_joint" axis="0 1 0" range="-0.576 3.8397" armature="0.0019"/>
+                <inertial mass="1" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="left_hip_pitch_joint_ctrl" joint="left_hip_pitch_joint"/>
+    <motor name="left_hip_roll_joint_ctrl" joint="left_hip_roll_joint"/>
+    <motor name="left_hip_yaw_joint_ctrl" joint="left_hip_yaw_joint"/>
+    <motor name="left_knee_pitch_joint_ctrl" joint="left_knee_pitch_joint"/>
+    <motor name="left_ankle_pitch_joint_ctrl" joint="left_ankle_pitch_joint"/>
+    <motor name="left_ankle_roll_joint_ctrl" joint="left_ankle_roll_joint"/>
+    <motor name="right_hip_pitch_joint_ctrl" joint="right_hip_pitch_joint"/>
+    <motor name="right_hip_roll_joint_ctrl" joint="right_hip_roll_joint"/>
+    <motor name="right_hip_yaw_joint_ctrl" joint="right_hip_yaw_joint"/>
+    <motor name="right_knee_pitch_joint_ctrl" joint="right_knee_pitch_joint"/>
+    <motor name="right_ankle_pitch_joint_ctrl" joint="right_ankle_pitch_joint"/>
+    <motor name="right_ankle_roll_joint_ctrl" joint="right_ankle_roll_joint"/>
+    <motor name="waist_yaw_joint_ctrl" joint="waist_yaw_joint"/>
+    <motor name="left_shoulder_pitch_joint_ctrl" joint="left_shoulder_pitch_joint"/>
+    <motor name="left_shoulder_roll_joint_ctrl" joint="left_shoulder_roll_joint"/>
+    <motor name="left_shoulder_yaw_joint_ctrl" joint="left_shoulder_yaw_joint"/>
+    <motor name="left_elbow_pitch_joint_ctrl" joint="left_elbow_pitch_joint"/>
+    <motor name="right_shoulder_pitch_joint_ctrl" joint="right_shoulder_pitch_joint"/>
+    <motor name="right_shoulder_roll_joint_ctrl" joint="right_shoulder_roll_joint"/>
+    <motor name="right_shoulder_yaw_joint_ctrl" joint="right_shoulder_yaw_joint"/>
+    <motor name="right_elbow_pitch_joint_ctrl" joint="right_elbow_pitch_joint"/>
+  </actuator>
+</mujoco>

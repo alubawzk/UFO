@@ -39,6 +39,7 @@ dependencies = [
 pico-teleop = [
     "loop-rate-limiters>=1.1.0",
     "mink>=0.0.13",
+    "pybind11>=2.13.0",
     "pyzmq>=26.0.0",
     "qpsolvers[daqp]>=4.8.1",
     "smplx>=0.1.28",
@@ -67,9 +68,18 @@ url = "https://pypi.nvidia.com/"
 
 [tool.setuptools.package-data]
 humanoidverse = ["config/**/*", "data/**/*"]
+pico_sim2sim = [
+    "README.md",
+    "install.sh",
+    "joyin/*.json",
+    "joyin/*.xml",
+    "third_party/*",
+    "xrobotoolkit_binding/CMakeLists.txt",
+    "xrobotoolkit_binding/bindings/*.cpp",
+]
 
 [tool.setuptools.packages.find]
-include = ["humanoidverse*"]
+include = ["humanoidverse*", "pico_sim2sim*"]
 
 [dependency-groups]
 dev = [

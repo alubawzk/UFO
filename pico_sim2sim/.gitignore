@@ -1,0 +1,6 @@
+.build/
+.downloads/
+.tools/
+native/
+recordings/
+__pycache__/

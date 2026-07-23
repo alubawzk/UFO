@@ -17,9 +17,9 @@ Sonic SMPL pose + root orientation
         ↓
 标准 SMPL-X 参数（pose_body/root_orient/trans/betas）
         ↓
-JOYIn SMPL-X body model + get_smplx_data()
+真实 `pico_sim2sim/smplx/SMPLX_NEUTRAL.pkl` 前向计算
         ↓
-本地 JOYIn-Retarget：smplx_to_mini3
+内置 JOYIn GeneralMotionRetargeting：smplx_to_mini3
         ↓
 Mini3 reference qpos
         ↓
@@ -40,7 +40,7 @@ humanoidverse/mujoco_tracking_inference.py
 
 ### 2.1 PICO 实时数据
 
-脚本订阅 Sonic PICO manager 发布的 `pose` ZMQ 消息，默认地址为：
+脚本订阅 `pico_sim2sim.sonic_server` 发布的 Sonic 兼容 `pose` ZMQ 消息，默认地址为：
 
 ```text
 tcp://127.0.0.1:5556
@@ -69,30 +69,51 @@ tcp://127.0.0.1:5556
 
 离线模式使用 `sonic_smpl_pose` 和 `sonic_smpl_anchor_orientation` 重建标准 SMPL-X 参数；`sonic_smpl_joints` 不直接参与重定向。如果 NPZ 包含 `body_pos_w`，默认会恢复录制动作的根节点平移，因此 walking 和 running 不只是原地摆腿。
 
-## 3. 安装遥操依赖
+## 3. 新电脑安装
 
-在 UFO 仓库根目录执行：
+Gear Sonic 的姿态发布链路、JOYIn GMR、IK 配置、Mini3 IK 模型和
+XRoboToolkit Python binding 源码和真实 neutral SMPL-X 模型都已经放在
+`pico_sim2sim/` 中。运行时不再需要外部的 `GR00T-WholeBodyControl` 或
+`JOYIn-Retarget` 工程。
+
+在新电脑上执行：
 
 ```bash
-cd /home/amax/Desktop/robot/UFO
+git clone <UFO repository URL>
+cd UFO
+bash pico_sim2sim/install.sh
+```
+
+安装脚本会：
+
+1. 安装 `cmake`、编译器等系统工具；若系统没有 `uv`，在 `pico_sim2sim/.tools/` 自动安装固定版本；
+2. 按 Ubuntu 22.04/24.04 安装官方 XRoboToolkit PC Service v1.0.0；
+3. 通过 Git LFS 取得 `pico_sim2sim/smplx/SMPLX_NEUTRAL.pkl`，并检查它不是未解析的 LFS pointer；
+4. 执行 `uv sync --extra pico-teleop`，安装 `smplx`、`mink`、`qpsolvers[daqp]`、`pyzmq` 和 `pybind11`；
+5. 下载固定版本的 XRoboToolkit PC Service 源码并编译 PXREA SDK；
+6. 将 Python extension 和原生库生成到 `pico_sim2sim/native/`。
+
+安装完成后检查：
+
+```bash
+.venv/bin/python -m pico_sim2sim.doctor
+```
+
+`runs/` 是本仓库的本地训练输出并被 `.gitignore` 排除；当前使用的
+`runs/Revise_torque_limit` 权重约为 3.3 GB，普通 Git clone 不会包含它。要在新电脑
+运行 policy，仍需把该 run 目录复制到新电脑，或在发布 checkpoint 后改用对应下载地址。
+`doctor` 会同时检查 `config.json` 和 `model.safetensors`，避免启动后才发现权重缺失。
+
+PICO 头显还需要安装官方
+[XRoboToolkit-PICO-1.1.1.apk](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases/download/v1.1.1/XRoboToolkit-PICO-1.1.1.apk)。
+这是设备侧应用，不能由 PC 仓库安装脚本自动完成。PC 和 PICO 需要位于同一网络，并在
+PICO 应用中连接运行 UFO 的电脑。
+
+如果只做离线 NPZ 测试，不接 PICO 硬件，可以只执行：
+
+```bash
 uv sync --extra pico-teleop
 ```
-
-`pico-teleop` extra 包含：
-
-- `mink`
-- `qpsolvers[daqp]`
-- `pyzmq`
-- `loop-rate-limiters`
-- `smplx`
-
-JOYIn 源码不会复制到 UFO 中，运行时默认从下面的本地工程导入：
-
-```text
-/home/amax/Desktop/robot/JOYIn-Retarget
-```
-
-可通过 `--joyin-root` 指定其他路径。
 
 ## 4. 离线测试
 
@@ -154,40 +175,35 @@ cd /home/amax/Desktop/robot/UFO
 
 ### 5.1 启动 PICO/Sonic 服务
 
-在第一个终端中进入 GR00T-WholeBodyControl：
+终端 1 和终端 2 都只需要进入 UFO：
 
 ```bash
-cd /home/amax/Desktop/robot/GR00T-WholeBodyControl
-source .venv_teleop/bin/activate
+cd /path/to/UFO
+source .venv/bin/activate
 
-python gear_sonic/scripts/pico_manager_thread_server.py \
+python -m pico_sim2sim.sonic_server \
   --port 5556 \
-  --target_fps 50 \
-  --num_frames_to_send 5
+  --target-fps 50 \
+  --num-frames-to-send 5
 ```
 
-这条命令使用脚本默认的单线程 pose streaming 模式，并通过 `tcp://127.0.0.1:5556` 发布最近 5 帧、目标频率为 50 Hz 的 Sonic pose 数据。
-
-需要观察 PICO 骨架时，可以增加：
-
-```text
---vis_vr3pt --vis_smpl
-```
+这条命令会启动已安装的 XRoboToolkit PC Service，读取 24 个 PICO/XRT
+全身关节，并通过 `tcp://127.0.0.1:5556` 发布最近 5 帧、目标频率为 50 Hz 的
+Sonic 兼容数据。
 
 启动服务后：
 
 1. 戴好 PICO 头显、控制器和身体追踪器。
-2. 保持标定姿势。
-3. 按 `A+B+X+Y` 完成初始化和标定。
-4. 按 `A+X` 进入 POSE 模式。
-5. POSE 模式开始后，manager 才会持续发布 `pose` 数据。
+2. 打开 XRoboToolkit PICO 应用并连接 PC IP。
+3. 按 PICO 应用提示完成身体追踪器标定。
+4. `sonic_server` 看到 body data 后会自动开始发布，不需要 Gear manager 的模式切换。
 
 ### 5.2 启动 Mini3 UFO MuJoCo 遥操
 
 在第二个终端执行当前带首帧自动落地校正的命令：
 
 ```bash
-cd /home/amax/Desktop/robot/UFO
+cd /path/to/UFO
 source .venv/bin/activate
 
 python -m humanoidverse.mujoco_pico_teleop \
@@ -210,7 +226,7 @@ python -m humanoidverse.mujoco_pico_teleop \
 
 ## 6. JOYIn 重定向处理
 
-脚本严格复用本地 JOYIn 的 SMPL-X 数据入口和 Mini3 重定向器：
+脚本使用 `pico_sim2sim/joyin/` 中集成的 JOYIn Mini3 重定向器：
 
 ```python
 GeneralMotionRetargeting(
@@ -225,8 +241,8 @@ GeneralMotionRetargeting(
 2. 对 Sonic 已移除 SMPL base rotation 的 `body_quat_w` 做逆变换，恢复标准 z-up `root_orient`。
 3. 离线数据使用录制根位移作为 `trans`；实时 Sonic 未发布 pelvis 位移，因此显式使用零 `trans`。
 4. Sonic 未发布人体形状，因此显式使用 neutral SMPL-X 的 16 维零 `betas`，默认人体高度按 JOYIn 公式得到 `1.66 m`；可用 `--actual-human-height` 覆盖重定向缩放。
-5. 调用 JOYIn 工程中的 `SMPLX_NEUTRAL.pkl` body model 做前向计算，再调用 JOYIn 的 `get_smplx_data()` 生成全局关节位置和旋转。Sonic 的 `smpl_joints` 不参与这一步。
-6. 将 JOYIn `get_smplx_data()` 的原生输出直接送入 `GeneralMotionRetargeting.retarget()`，由 `smplx_to_mini3.json` 生成 Mini3 qpos。
+5. 使用 `smplx` 包加载仓库内真实的 `SMPLX_NEUTRAL.pkl`，执行 body model 前向计算，再按真实 parent tree 生成 JOYIn 所需的全局关节位置和 `wxyz` 旋转。Sonic 的 `smpl_joints` 不参与遥操端这一步。
+6. 将上述身体数据送入集成的 `GeneralMotionRetargeting.retarget()`，由 `pico_sim2sim/joyin/smplx_to_mini3.json` 和 `mini3_ik.xml` 生成 Mini3 qpos。
 7. 按关节名称将 JOYIn qpos 映射到 UFO checkpoint 的 21 个 Mini3 control joints，不依赖裸索引顺序。
 8. 默认使用 `offset_to_ground=True`，让脚部目标保持在地面附近。
 9. 启动时对首帧 Mini3 qpos 做一次 MuJoCo 前向运动学，计算左右脚碰撞 mesh 的最低顶点，得到固定的 `z_offset = ground_z - lowest_foot_z`。之后所有 reference 根高度都加同一个 offset，不做逐帧抖动式校正。
@@ -285,8 +301,8 @@ reference 的根部 XY 跟随实际机器人，并默认沿 Y 方向偏移 `1.0 
 | 参数 | 默认值 | 说明 |
 | --- | ---: | --- |
 | `--pico-endpoint` | `tcp://127.0.0.1:5556` | 实时 Sonic 地址 |
-| `--joyin-root` | `/home/amax/Desktop/robot/JOYIn-Retarget` | 本地 JOYIn 工程 |
-| `--smplx-device` | 与 `--device` 相同 | SMPL-X body model 运行设备；显存不足时可设为 `cpu` |
+| `--joyin-root` | 仓库内 `pico_sim2sim` | 内置 JOYIn 资源根目录，通常无需修改 |
+| `--smplx-device` | 与 `--device` 相同 | 真实 SMPL-X 前向计算设备；可单独指定 `cpu` 或 `cuda:0` |
 | `--show-retarget-reference` | `true` | 在实际机器人旁显示青色 Mini3 reference |
 | `--retarget-visual-lateral-offset` | `1.0` | reference 相对实际机器人的 Y 方向偏移，单位 m |
 | `--retarget-visual-alpha` | `0.45` | reference 透明度，范围 `(0,1]` |
@@ -316,11 +332,13 @@ reference 的根部 XY 跟随实际机器人，并默认沿 Y 方向偏移 `1.0 
 - walking、running、pickup 共 1390 帧全部通过 JOYIn；
 - JOYIn 输出的 root pose 和 21 个关节均无 NaN/Inf；
 - 首帧 Mini3 左右脚碰撞 mesh 的最低点用于一次性 z 标定，校正后的首帧最低点与 `z=0` 对齐；
-- CPU 上包含 SMPL-X body model 前向计算的 JOYIn 重定向平均约 `8.06 ms/帧`，99 分位约 `19.76 ms`；运行时完整编码耗时以日志中的 `retarget=...ms` 为准；
+- 仓库内真实 `SMPLX_NEUTRAL.pkl` 可由 `smplx 0.1.28` 正常加载，模型 parent tree 为 55 个关节；
+- neutral 零姿态前向输出的 JOYIn 22 个关节及 Sonic 24 个关节点均为有限值；
+- 本机 CPU 上真实 SMPL-X 单帧前向约 `4.2 ms`；walking rollout 预热后的完整 `retarget` 约 `24.5 ms`，实时 50 Hz 建议让遥操端使用 `--smplx-device cuda:0`；
 - walking 和 running 均使用真实 Mini3 checkpoint 完成端到端 MuJoCo rollout；
 - 在线 latent 范数稳定为 `16`；
 - PICO/Sonic 协议、6D 旋转、标准 SMPL-X 参数恢复、NPZ 回放、backward observation 和 latent 平滑单测全部通过；
-- `mujoco_tracking_inference.py` 保持未修改。
+- 离线端到端命令不再访问两个外部工程；SMPL-X 前向直接使用仓库内真实模型。
 
 运行相关单测：
 
@@ -341,12 +359,18 @@ reference 的根部 XY 跟随实际机器人，并默认沿 Y 方向偏移 `1.0 
 - 实时模式不能从现有消息恢复 room-scale 绝对根位移；
 - 离线 walking/running 会从 `body_pos_w` 恢复根位移。
 
-如果实时模式也需要绝对根平移，需要扩展 `pico_manager_thread_server.py` 的 `pose` 协议，额外发布经过坐标转换的 pelvis/root translation。
+如果实时模式也需要绝对根平移，需要扩展 `pico_sim2sim.sonic_server` 的
+`pose` 协议，额外发布经过坐标转换的 pelvis/root translation。
 
 ### 11.2 实时人体形状
 
-当前 Sonic `pose` 消息没有发布 SMPL-X `betas`。实时模式使用 JOYIn neutral 模型的 16 维零 `betas`。若需要匹配具体操作者体型，应扩展协议发送标定后的 `betas`，或增加本地标定文件。
+当前 Sonic `pose` 消息没有发布 SMPL-X `betas`。实时模式会对真实 neutral
+SMPL-X body model 输入 16 维零 `betas`，JOYIn 默认人体高度为 `1.66 m`。
+可用 `--actual-human-height` 调整 JOYIn scale；若后续能从标定流程得到人体
+shape 参数，可直接传入已经接通的真实 body model。
 
 ### 11.3 硬件验证
 
-离线 PICO 数据、JOYIn、UFO checkpoint 和 MuJoCo 已完成端到端验证。真实 PICO 头显的最终延迟、丢帧和追踪质量仍需要在 PICO/Sonic 服务实际运行时测试。
+离线 PICO 数据、内置 JOYIn、UFO checkpoint 和 MuJoCo 已完成端到端验证。
+XRoboToolkit 原生 SDK 的安装和加载可由 `doctor` 检查；真实 PICO 头显的最终延迟、
+丢帧和追踪质量仍需要连接头显后测试。
