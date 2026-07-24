@@ -237,24 +237,30 @@ nohup bash -lc '
 ' > /home/wzk/UFO/ufo_fb_lafan1_mini3_AddJointParams.log 2>&1 &
 
 ## Fine-tune
+# --init-checkpoint runs/Revise_torque_limit \
 nohup bash -lc '
   cd /home/wzk/UFO &&
   source /root/.local/bin/env &&
   source .venv/bin/activate &&
   export PYTHONUNBUFFERED=1 &&
+  export WANDB_ENTITY="ricardo_wzk-soochow-university" &&
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ./run_train.sh \
     --agent fb \
     --robot-config configs/robots/mini3.yaml \
     --data-manifest configs/data/lafan1_mini3.yaml \
     --gpu-ids all \
-    --init-checkpoint runs/Revise_torque_limit \
     --lr-scale 0.5 \
     --num-envs 1024 \
     --num-env-steps 192000000 \
     --buffer-size 1500000 \
     --checkpoint-every-steps 3200000 \
-    --work-dir runs/ufo_fb_lafan1_mini3_real_motor_finetune
-' > /home/wzk/UFO/ufo_fb_lafan1_mini3_real_motor_finetune.log 2>&1 &
+    --work-dir runs/WO_DR_Test \
+    --disable-dr \
+    --disable-obs-noise \
+    --no-checkpoint-buffer \
+    --use-wandb \
+    --wandb-run-name mini3_WO_DR_Test
+' > /home/wzk/UFO/WO_DR_Test.log 2>&1 &
 
 # 跌倒/爬起动作使用 --cartwheel-aux-safe：关闭非期望接触、脚部姿态、
 # 朝向、打滑和踝关节 roll 惩罚，并减小 action-rate 惩罚；关节位置与力矩限制仍保留。
@@ -348,6 +354,17 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference 
   --reference-lateral-offset 1.0 \
   --reference-alpha 0.45 \
   --enable-real-motor false
+
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new \
+  --data-path humanoidverse/data/pico_data/sample_clip_mini3_ufo.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless false \
+  --loop true \
+  --show-reference-motion true \
+  --latent-future-frames 3 \
+  --latent-future-gamma 0.8
 ```
 
 该命令会同时显示两台 Mini3：原材质机器人是 policy 实际控制的 MuJoCo 机器人，青色半透明机器人是 `motion-id 2` 对应的 MotionLib reference motion，并沿 Y 方向错开 `1.0 m` 方便对比。

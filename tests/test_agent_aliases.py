@@ -71,6 +71,23 @@ class AgentAliasesTest(unittest.TestCase):
         self.assertEqual(scaling["penalty_action_rate"], -0.2)
         self.assertEqual(scaling["penalty_ankle_roll"], -1.0)
 
+    def test_fb_preset_uses_rebalanced_actor_regularization(self) -> None:
+        selected = build_agent_preset(
+            agent="fb",
+            device="cpu",
+            compile=False,
+            update_z_every_step=100,
+            lr_scale=1.0,
+            clip_grad_norm=0.0,
+            cartwheel_aux_safe=False,
+            wandb_project="test",
+        )
+
+        train = selected["agent_cfg"].train
+        self.assertEqual(train.reg_coeff, 0.001)
+        self.assertEqual(train.reg_coeff_aux, 0.0005)
+        self.assertTrue(train.scale_reg)
+
     def test_cartwheel_safe_takes_precedence_over_robot_aux_reward_overrides(self) -> None:
         selected = build_agent_preset(
             agent="fb",

@@ -737,9 +737,45 @@ def _reference_trajectory(ref: dict[str, torch.Tensor]) -> MotionReferenceTrajec
 
 
 @torch.no_grad()
-def _tracking_z(model: torch.nn.Module, backward_obs: dict[str, torch.Tensor], device: str) -> torch.Tensor:
+def _future_weighted_mean(values: torch.Tensor, future_frames: int, gamma: float) -> torch.Tensor:
+    """Aggregate each latent with its current and future trajectory frames.
+
+    ``future_frames=3`` uses frames ``[t, t + 1, t + 2]``.  Near the end of
+    the trajectory, only the remaining frames are used so a loop boundary
+    never mixes the end of one replay with the beginning of the next.
+    """
+
+    if values.ndim != 2:
+        raise ValueError(f"Expected latent values with shape [T, Z], got {tuple(values.shape)}")
+    if future_frames <= 0:
+        raise ValueError(f"future_frames must be positive, got {future_frames}")
+    if not math.isfinite(gamma) or not 0.0 < gamma <= 1.0:
+        raise ValueError(f"gamma must be in (0, 1], got {gamma}")
+    if values.shape[0] == 0 or future_frames == 1:
+        return values
+
+    weights = gamma ** torch.arange(future_frames, device=values.device, dtype=values.dtype)
+    aggregated = torch.empty_like(values)
+    for step in range(values.shape[0]):
+        available = min(future_frames, values.shape[0] - step)
+        step_weights = weights[:available]
+        aggregated[step] = (values[step : step + available] * step_weights[:, None]).sum(dim=0) / step_weights.sum()
+    return aggregated
+
+
+@torch.no_grad()
+def _tracking_z(
+    model: torch.nn.Module,
+    backward_obs: dict[str, torch.Tensor],
+    device: str,
+    *,
+    future_frames: int = 1,
+    future_gamma: float = 1.0,
+) -> torch.Tensor:
     obs = tree_map(lambda value: value[1:].to(device) if hasattr(value, "to") else value, backward_obs)
-    return model.project_z(model.backward_map(obs))
+    raw_z = model.backward_map(obs)
+    raw_z = _future_weighted_mean(raw_z, future_frames, future_gamma)
+    return model.project_z(raw_z)
 
 
 def _initialize_from_reference(
@@ -814,7 +850,19 @@ def run(args: argparse.Namespace) -> None:
     )
     del motion_lib
     reference_trajectory = _reference_trajectory(ref) if args.show_reference_motion else None
-    z = _tracking_z(policy, backward_obs, args.device)
+    z = _tracking_z(
+        policy,
+        backward_obs,
+        args.device,
+        future_frames=args.latent_future_frames,
+        future_gamma=args.latent_future_gamma,
+    )
+    print(
+        f"[tracking-latent] mode=future frames={args.latent_future_frames} "
+        f"gamma={args.latent_future_gamma:g} offsets=[0..{args.latent_future_frames - 1}] "
+        f"tail=truncate-before-loop",
+        flush=True,
+    )
     if args.start_step:
         z = z[args.start_step :]
     if args.max_steps is not None:
@@ -987,8 +1035,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-elevation", type=float, default=-18.0)
     parser.add_argument("--reference-lateral-offset", type=float, default=1.0)
     parser.add_argument("--reference-alpha", type=float, default=0.45)
+    parser.add_argument(
+        "--latent-future-frames",
+        type=int,
+        default=1,
+        help="Number of current/future reference latents to aggregate; 3 means frames [t, t+1, t+2].",
+    )
+    parser.add_argument(
+        "--latent-future-gamma",
+        type=float,
+        default=1.0,
+        help="Future-latent decay factor; frame offset k receives weight gamma**k.",
+    )
     _add_bool_arg(parser, "--headless", False, "Run without the interactive MuJoCo viewer.")
-    _add_bool_arg(parser, "--show-reference-motion", False, "Show the MotionLib reference as a cyan robot beside the simulation.")
+    _add_bool_arg(parser, "--show-reference-motion", True, "Show the MotionLib reference as a cyan robot beside the simulation.")
     _add_bool_arg(parser, "--loop", False, "Reset and replay the selected motion continuously.")
     _add_bool_arg(parser, "--realtime", True, "Rate-limit viewer rollout to policy_hz.")
     _add_bool_arg(parser, "--zero-init-velocity", False, "Zero root and joint velocities when resetting.")
@@ -1024,6 +1084,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--reference-lateral-offset must be finite")
     if not 0.0 < args.reference_alpha <= 1.0:
         parser.error("--reference-alpha must be in (0, 1]")
+    if args.latent_future_frames <= 0:
+        parser.error("--latent-future-frames must be positive")
+    if not math.isfinite(args.latent_future_gamma) or not 0.0 < args.latent_future_gamma <= 1.0:
+        parser.error("--latent-future-gamma must be in (0, 1]")
     if args.torque_response_kp < 0.0 or args.torque_response_ki < 0.0:
         parser.error("--torque-response-kp and --torque-response-ki must be nonnegative")
     if args.torque_response_plant_tau_ms <= 0.0:

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.train import build_ufo_mjlab_config, parse_args
-from humanoidverse.training.workspace import _accumulate_metrics, _trajectory_output_keys
+from humanoidverse.training.workspace import Workspace, _accumulate_metrics, _trajectory_output_keys
 
 
 class UpdateZCliTest(unittest.TestCase):
@@ -65,6 +67,66 @@ class UpdateZCliTest(unittest.TestCase):
             init_checkpoint=args.init_checkpoint,
         )
         self.assertEqual(cfg.init_checkpoint, str(Path("runs/old_dc").resolve()))
+
+    def test_checkpoint_buffer_is_enabled_by_default(self) -> None:
+        args = self._parse()
+        self.assertFalse(args.no_checkpoint_buffer)
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_checkpoint_buffer_default_test",
+            num_envs=1,
+            num_env_steps=1,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            checkpoint_buffer=not args.no_checkpoint_buffer,
+        )
+        self.assertTrue(cfg.checkpoint_buffer)
+
+    def test_no_checkpoint_buffer_cli_disables_buffer_checkpoint(self) -> None:
+        args = self._parse("--no-checkpoint-buffer")
+        self.assertTrue(args.no_checkpoint_buffer)
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_no_checkpoint_buffer_test",
+            num_envs=1,
+            num_env_steps=1,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            checkpoint_buffer=not args.no_checkpoint_buffer,
+        )
+        self.assertFalse(cfg.checkpoint_buffer)
+
+    def test_disabled_checkpoint_buffer_still_saves_training_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Workspace.__new__(Workspace)
+            workspace.cfg = SimpleNamespace(
+                distributed_sync=False,
+                distributed_world_size=1,
+                checkpoint_buffer=False,
+                agent=SimpleNamespace(train=SimpleNamespace(batch_size=32)),
+            )
+            workspace.work_dir = Path(tmp_dir)
+            workspace._write_shared_artifacts = True
+            workspace.agent = SimpleNamespace(
+                save=Mock(side_effect=lambda path: Path(path).mkdir(parents=True, exist_ok=True))
+            )
+            replay_buffer = SimpleNamespace(save=Mock())
+
+            workspace.save(
+                local_time=100,
+                global_time=100,
+                optimizer_steps=10,
+                replay_buffer={"train": replay_buffer},
+            )
+
+            workspace.agent.save.assert_called_once_with(str(Path(tmp_dir) / "checkpoint"))
+            replay_buffer.save.assert_not_called()
+            self.assertTrue((Path(tmp_dir) / "checkpoint" / "train_status.json").is_file())
+            self.assertFalse((Path(tmp_dir) / "checkpoint" / "buffers").exists())
 
     def test_tldr_trajectory_buffer_keeps_aux_rewards(self) -> None:
         selected = build_agent_preset(

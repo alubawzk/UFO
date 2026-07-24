@@ -90,7 +90,7 @@ training:
   # The buffer advances at 500 Hz; only the actor's angular velocity and
   # projected gravity are delayed. Privileged state and rewards stay current.
   imu_delay:
-    enabled: true
+    enabled: false
     time_range_s: [0.008, 0.026]
     randomize_on_reset: true
     interpolate: true

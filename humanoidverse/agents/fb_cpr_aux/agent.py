@@ -12,10 +12,10 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils._pytree import tree_map
 
+from ...distributed import average_gradients
 from ..base import BaseConfig
 from ..fb_cpr.agent import FBcprAgent, FBcprAgentTrainConfig
 from ..nn_models import _soft_update_params, eval_mode
-from ...distributed import average_gradients
 from .model import FBcprAuxModelConfig
 
 
@@ -277,11 +277,10 @@ class FBcprAuxAgent(FBcprAgent):
             _, _, Q_fb = self.get_targets_uncertainty(Qs_fb, self.cfg.train.actor_pessimism_penalty)  # batch
 
             weight = Q_fb.abs().mean().detach() if self.cfg.train.scale_reg else 1.0
-            actor_loss = (
-                -Q_discriminator.mean() * self.cfg.train.reg_coeff * weight
-                - Q_aux.mean() * self.cfg.train.reg_coeff_aux * weight
-                - Q_fb.mean()
-            )
+            actor_loss_discriminator = -Q_discriminator.mean() * self.cfg.train.reg_coeff * weight
+            actor_loss_aux = -Q_aux.mean() * self.cfg.train.reg_coeff_aux * weight
+            actor_loss_fb = -Q_fb.mean()
+            actor_loss = actor_loss_discriminator + actor_loss_aux + actor_loss_fb
 
         # optimize actor
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -292,10 +291,20 @@ class FBcprAuxAgent(FBcprAgent):
         self.actor_optimizer.step()
 
         with torch.no_grad():
+            scale_weight = weight if isinstance(weight, torch.Tensor) else torch.tensor(weight, device=self.device)
             output_metrics = {
                 "actor_loss": actor_loss.detach(),
+                "actor_loss/discriminator": actor_loss_discriminator.detach(),
+                "actor_loss/aux": actor_loss_aux.detach(),
+                "actor_loss/fb": actor_loss_fb.detach(),
                 "Q_discriminator": Q_discriminator.mean().detach(),
                 "Q_aux": Q_aux.mean().detach(),
                 "Q_fb": Q_fb.mean().detach(),
+                "actor_weight/scale_q_fb": scale_weight.detach(),
+                "actor_weight/discriminator": (self.cfg.train.reg_coeff * scale_weight).detach(),
+                "actor_weight/aux": (self.cfg.train.reg_coeff_aux * scale_weight).detach(),
+                "cfg/reg_coeff": torch.tensor(self.cfg.train.reg_coeff, device=self.device),
+                "cfg/reg_coeff_aux": torch.tensor(self.cfg.train.reg_coeff_aux, device=self.device),
+                "cfg/scale_reg": torch.tensor(float(self.cfg.train.scale_reg), device=self.device),
             }
         return output_metrics

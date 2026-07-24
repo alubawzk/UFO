@@ -326,6 +326,19 @@ CUDA_VISIBLE_DEVICES=0 ./run_train.sh \
 
 正式训练前可以根据 smoke 的显存和吞吐结果调整 `--num-envs` 和 `--buffer-size`。
 
+默认 checkpoint 会保存每张 GPU 的 rank-local replay buffer。8 卡、每卡
+`--buffer-size 1500000` 时，这部分磁盘占用约为 49 GB。如果不要求断点恢复
+时同时恢复 replay 数据，可以在训练命令中增加：
+
+```bash
+--no-checkpoint-buffer
+```
+
+该开关只跳过 `checkpoint/buffers/train_rank_*` 的写入，不改变训练期间使用的
+replay buffer，也不会停止保存模型、optimizer 和训练步数。没有已有 buffer
+文件时，恢复训练会使用空 replay buffer；已有实验目录中的旧 buffer 文件不会
+被自动删除。
+
 如需 W&B：
 
 ```bash

@@ -107,6 +107,7 @@ def build_ufo_mjlab_config(
     data_mix_weights: list[float] | None = None,
     update_z_every_step: int | None = None,
     buffer_size: int = DEFAULT_BUFFER_SIZE,
+    checkpoint_buffer: bool | None = None,
     disable_dr: bool = False,
     disable_obs_noise: bool = False,
     lr_scale: float = 1.0,
@@ -145,9 +146,7 @@ def build_ufo_mjlab_config(
             )
         ]
     agent_device = "cuda" if device.startswith("cuda") else "cpu"
-    resolved_update_z_every_step = (
-        _default_update_z_every_step(agent) if update_z_every_step is None else int(update_z_every_step)
-    )
+    resolved_update_z_every_step = _default_update_z_every_step(agent) if update_z_every_step is None else int(update_z_every_step)
     selected = build_agent_preset(
         agent=agent,
         device=agent_device,
@@ -221,7 +220,7 @@ def build_ufo_mjlab_config(
         num_seed_steps=train_runtime["num_seed_steps"],
         num_agent_updates=train_runtime["num_agent_updates"],
         checkpoint_every_steps=checkpoint_every_steps,
-        checkpoint_buffer=train_runtime["checkpoint_buffer"],
+        checkpoint_buffer=train_runtime["checkpoint_buffer"] if checkpoint_buffer is None else checkpoint_buffer,
         init_checkpoint=str(Path(init_checkpoint).expanduser().resolve()) if init_checkpoint is not None else None,
         prioritization=run_eval_and_prioritization,
         prioritization_min_val=0.5,
@@ -316,6 +315,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         data_mix_weights=args.data_mix_weights,
         update_z_every_step=args.update_z_every_step,
         buffer_size=args.buffer_size,
+        checkpoint_buffer=not args.no_checkpoint_buffer,
         disable_dr=bool(args.disable_dr),
         disable_obs_noise=bool(args.disable_obs_noise),
         lr_scale=args.lr_scale,
@@ -331,11 +331,15 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"data_path={cfg.env.lafan_tail_path}, data_mix_weights={cfg.env.data_mix_weights}, "
         f"num_envs_per_rank={args.num_envs}, global_parallel_envs={args.num_envs * world_size}, "
         f"num_env_steps_global={args.num_env_steps}, buffer_size_per_rank={cfg.buffer_size}, "
+        f"checkpoint_buffer={cfg.checkpoint_buffer}, "
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"init_checkpoint={cfg.init_checkpoint}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
         f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"compile={cfg.agent.compile}, "
+        f"reg_coeff={getattr(cfg.agent.train, 'reg_coeff', None)}, "
+        f"reg_coeff_aux={getattr(cfg.agent.train, 'reg_coeff_aux', None)}, "
+        f"scale_reg={getattr(cfg.agent.train, 'scale_reg', None)}, "
         f"aux_rewards_scaling={dict(cfg.agent.aux_rewards_scaling) if hasattr(cfg.agent, 'aux_rewards_scaling') else {}}",
         flush=True,
     )
@@ -414,7 +418,9 @@ def parse_args() -> argparse.Namespace:
         choices=["fb", "tech", "tldr"],
         help="Training agent preset: fb or tech. tldr is a deprecated alias for tech.",
     )
-    parser.add_argument("--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES.")
+    parser.add_argument(
+        "--gpu-ids", default="single", help="'single', 'all', or a comma-separated GPU id list relative to CUDA_VISIBLE_DEVICES."
+    )
     parser.add_argument("--work-dir", default=DEFAULT_WORK_DIR)
     parser.add_argument(
         "--robot-config",
@@ -468,6 +474,14 @@ def parse_args() -> argparse.Namespace:
         help="Override latent update interval. Defaults to 100 for FB and 10 for TeCH.",
     )
     parser.add_argument("--buffer-size", type=int, default=DEFAULT_BUFFER_SIZE, help="Replay capacity per rank/GPU.")
+    parser.add_argument(
+        "--no-checkpoint-buffer",
+        action="store_true",
+        help=(
+            "Do not write rank-local replay buffers into checkpoints. Model, optimizer, and training counters "
+            "are still saved; a resume without existing buffer files starts with an empty replay buffer."
+        ),
+    )
     parser.add_argument(
         "--num-agent-updates",
         type=int,

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
+import torch
 
 from humanoidverse.mujoco_tracking_inference import (
     ActorHistory,
@@ -12,7 +14,9 @@ from humanoidverse.mujoco_tracking_inference import (
     PhysicsStepActionDelay,
     PhysicsStepImuDelay,
     _dc_motor_clip,
+    _future_weighted_mean,
     _joint_layout,
+    parse_args,
 )
 from humanoidverse.utils.robot_spec import load_robot_spec
 
@@ -46,6 +50,42 @@ class MujocoTrackingInferenceTest(unittest.TestCase):
         torque = np.array([20.0, 20.0, -20.0])
         velocity = np.array([0.0, 2.5, -2.5])
         np.testing.assert_allclose(_dc_motor_clip(torque, velocity, effort, velocity_limit), [10.0, 5.0, -5.0])
+
+    def test_future_weighted_mean_uses_lookahead_and_truncates_tail(self) -> None:
+        values = torch.tensor([[1.0], [2.0], [4.0], [8.0]])
+
+        result = _future_weighted_mean(values, future_frames=3, gamma=0.5)
+
+        torch.testing.assert_close(
+            result,
+            torch.tensor(
+                [
+                    [12.0 / 7.0],
+                    [24.0 / 7.0],
+                    [16.0 / 3.0],
+                    [8.0],
+                ]
+            ),
+        )
+
+    def test_single_future_frame_keeps_latents_unchanged(self) -> None:
+        values = torch.randn(4, 3)
+        self.assertIs(_future_weighted_mean(values, future_frames=1, gamma=0.8), values)
+
+    def test_reference_motion_visualization_is_enabled_by_default(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "mujoco_tracking_inference",
+                "--model-folder",
+                "runs/example",
+                "--data-path",
+                "motion.pkl",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertTrue(args.show_reference_motion)
 
     def test_reference_visualizer_renders_selected_frame_beside_robot(self) -> None:
         robot_spec = load_robot_spec("configs/robots/mini3.yaml")
