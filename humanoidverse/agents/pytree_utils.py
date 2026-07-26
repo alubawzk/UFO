@@ -1,5 +1,7 @@
 # Custom utilities for handling PyTrees of torch tensors
 
+from collections.abc import Mapping
+
 import numpy as np
 import torch
 from tensordict import TensorDict
@@ -63,3 +65,37 @@ def tree_concat(list_of_pytree_of_tensors, dim=0):
 def tree_concat_numpy(list_of_pytree_of_arrays, dim=0):
     concatenated = tree_concat(list_of_pytree_of_arrays, dim=dim)
     return tree_map(lambda x: x.numpy() if isinstance(x, torch.Tensor) else x, concatenated)
+
+
+def assert_finite_tensors(pytree, *, label: str) -> None:
+    """Raise with tensor paths before non-finite replay data can poison an update."""
+    bad: list[str] = []
+
+    def visit(value, path: str) -> None:
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0 or not (value.dtype.is_floating_point or value.dtype.is_complex):
+                return
+            finite = torch.isfinite(value)
+            if bool(finite.all().item()):
+                return
+            invalid = ~finite
+            bad.append(
+                f"{path}: shape={tuple(value.shape)} dtype={value.dtype} "
+                f"bad_count={int(invalid.sum().item())} "
+                f"bad_indices={invalid.nonzero(as_tuple=False)[:5].detach().cpu().tolist()} "
+                f"bad_values={value[invalid][:5].detach().cpu().tolist()}"
+            )
+            return
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                visit(child, f"{path}.{key}")
+            return
+        if isinstance(value, (list, tuple)):
+            for idx, child in enumerate(value):
+                visit(child, f"{path}[{idx}]")
+
+    visit(pytree, label)
+    if bad:
+        details = "\n".join(f"  - {item}" for item in bad[:20])
+        more = "" if len(bad) <= 20 else f"\n  ... {len(bad) - 20} more non-finite tensors"
+        raise FloatingPointError(f"Non-finite tensor detected before agent update:\n{details}{more}")

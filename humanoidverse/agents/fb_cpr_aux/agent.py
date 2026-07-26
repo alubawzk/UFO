@@ -16,6 +16,7 @@ from ...distributed import average_gradients
 from ..base import BaseConfig
 from ..fb_cpr.agent import FBcprAgent, FBcprAgentTrainConfig
 from ..nn_models import _soft_update_params, eval_mode
+from ..pytree_utils import assert_finite_tensors
 from .model import FBcprAuxModelConfig
 
 
@@ -84,6 +85,10 @@ class FBcprAuxAgent(FBcprAgent):
     def update(self, replay_buffer, step: int) -> Dict[str, torch.Tensor]:
         expert_batch = replay_buffer["expert_slicer"].sample(self.cfg.train.batch_size)
         train_batch = replay_buffer["train"].sample(self.cfg.train.batch_size)
+        validate_first_update = not getattr(self, "_first_update_inputs_validated", False)
+        if validate_first_update:
+            assert_finite_tensors(train_batch, label="agent.update.raw_train_batch")
+            assert_finite_tensors(expert_batch, label="agent.update.raw_expert_batch")
 
         train_obs, train_action, train_next_obs = (
             tree_map(lambda x: x.to(self.device), train_batch["observation"]),
@@ -108,6 +113,12 @@ class FBcprAuxAgent(FBcprAgent):
                 self._model._obs_normalizer(expert_obs),
                 self._model._obs_normalizer(expert_next_obs),
             )
+        if validate_first_update:
+            assert_finite_tensors(train_obs, label="agent.update.normalized_train_obs")
+            assert_finite_tensors(train_next_obs, label="agent.update.normalized_train_next_obs")
+            assert_finite_tensors(expert_obs, label="agent.update.normalized_expert_obs")
+            assert_finite_tensors(expert_next_obs, label="agent.update.normalized_expert_next_obs")
+            self._first_update_inputs_validated = True
 
         torch.compiler.cudagraph_mark_step_begin()
         expert_z = self.encode_expert(next_obs=expert_next_obs)
