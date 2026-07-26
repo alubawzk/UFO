@@ -56,6 +56,7 @@ AGENT_ALIASES = {
 from humanoidverse.agents.envs.humanoidverse_mjlab import HumanoidVerseMjlabConfig
 from humanoidverse.agents.evaluations.humanoidverse_mjlab import HumanoidVerseMjlabTrackingEvaluationConfig
 from humanoidverse.agents.presets import build_agent_preset
+from humanoidverse.distributed import initialize_control_group
 from humanoidverse.training.workspace import TrainConfig
 from humanoidverse.utils.motion_data import prepare_motion_manifest
 from humanoidverse.utils.robot_spec import assert_robot_configs_compatible, load_robot_training_spec, resolve_robot_config_path
@@ -295,6 +296,9 @@ def _init_distributed(local_rank: int, world_size: int) -> None:
 def run_train(args: argparse.Namespace, log_dir: Path) -> None:
     device, _local_rank, rank, world_size = _select_device_and_rank(args.seed)
     _init_distributed(_local_rank, world_size)
+    initialize_control_group()
+    if world_size > 1 and rank == 0:
+        print("[INFO] Distributed CPU control group initialized for rank-asymmetric synchronization", flush=True)
     seed = args.seed + rank
     cfg = build_ufo_mjlab_config(
         device=device,

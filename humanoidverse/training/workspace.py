@@ -43,7 +43,15 @@ from humanoidverse.agents.fb_cpr_aux.agent import FBcprAuxAgentConfig
 from humanoidverse.agents.misc.loggers import CSVLogger
 from humanoidverse.agents.tldr_dist_aux.agent import TldrDistAuxAgentConfig
 from humanoidverse.agents.utils import EveryNStepsChecker, get_local_workdir, set_seed_everywhere
-from humanoidverse.distributed import average_metrics, barrier, broadcast_agent_state, broadcast_object, module_sync_report, sync_floating_buffers
+from humanoidverse.distributed import (
+    average_metrics,
+    barrier,
+    broadcast_agent_state,
+    broadcast_object,
+    control_barrier,
+    module_sync_report,
+    sync_floating_buffers,
+)
 
 TRAIN_LOG_FILENAME = "train_log.txt"
 REWARD_EVAL_LOG_FILENAME = "reward_eval_log.csv"
@@ -745,9 +753,9 @@ class Workspace:
                     if self.cfg.distributed_sync:
                         print(f"[INFO] Rank 0 evaluation returned at time {global_time}; entering distributed barrier")
                 if self.cfg.distributed_sync:
-                    barrier()
+                    control_barrier()
                     if self.distributed_rank == 0:
-                        print(f"[INFO] Distributed post-evaluation barrier completed at time {global_time}")
+                        print(f"[INFO] Distributed CPU post-evaluation barrier completed at time {global_time}")
                 eval_time_checker.update_last_step(global_time)
                 if uses_humanoidverse_eval:
                     # reset if there is a humanoidverse evaluation

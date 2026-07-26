@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
+from datetime import timedelta
 from typing import Any
 
 import torch
 import torch.distributed as dist
+
+_CONTROL_GROUP: Any | None = None
 
 
 def is_distributed() -> bool:
@@ -18,6 +21,27 @@ def rank() -> int:
 
 def world_size() -> int:
     return dist.get_world_size() if is_distributed() else int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def initialize_control_group() -> None:
+    """Create a CPU process group for long rank-asymmetric synchronization."""
+    global _CONTROL_GROUP
+    if not is_distributed() or _CONTROL_GROUP is not None:
+        return
+    if dist.get_backend() != "gloo":
+        _CONTROL_GROUP = dist.new_group(backend="gloo", timeout=timedelta(hours=2))
+
+
+def control_barrier() -> None:
+    """Synchronize ranks without occupying or depending on their CUDA streams."""
+    if not is_distributed():
+        return
+    if dist.get_backend() == "gloo":
+        dist.barrier()
+        return
+    if _CONTROL_GROUP is None:
+        raise RuntimeError("initialize_control_group() must be called on every rank before control_barrier()")
+    dist.barrier(group=_CONTROL_GROUP)
 
 
 def barrier() -> None:
