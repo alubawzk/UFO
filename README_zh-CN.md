@@ -252,16 +252,14 @@ nohup bash -lc '
     --data-manifest configs/data/lafan1_mini3.yaml \
     --gpu-ids all \
     --init-checkpoint runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new \
-    --lr-scale 0.25 \
+    --lr-scale 0.5 \
     --num-envs 1024 \
     --num-env-steps 192000000 \
     --buffer-size 1500000 \
     --checkpoint-every-steps 3200000 \
-    --work-dir runs/Align_DR_Terrain \
-    --no-checkpoint-buffer \
-    --use-wandb \
-    --wandb-run-name Align_DR_Terrain
-' > /home/wzk/UFO/Align_DR_Terrain.log 2>&1 &
+    --work-dir runs/Align_DR_Terrain4 \
+    --no-checkpoint-buffer
+' > /home/wzk/UFO/Align_DR_Terrain4.log 2>&1 &
 
 # --init-checkpoint 只加载源 run 的模型权重，不恢复 optimizer、replay buffer 和训练步数。
 # 新的 --work-dir 必须与源 run 不同，并且不能预先包含 checkpoint。

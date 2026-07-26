@@ -12,7 +12,12 @@ import torch
 
 from humanoidverse.agents.presets import build_agent_preset
 from humanoidverse.train import build_ufo_mjlab_config, parse_args
-from humanoidverse.training.workspace import Workspace, _accumulate_metrics, _trajectory_output_keys
+from humanoidverse.training.workspace import (
+    Workspace,
+    _accumulate_metrics,
+    _log_evaluation_metrics_to_wandb,
+    _trajectory_output_keys,
+)
 
 
 class UpdateZCliTest(unittest.TestCase):
@@ -158,6 +163,32 @@ class UpdateZCliTest(unittest.TestCase):
         self.assertEqual(counts, {"tldr_te_loss": 2, "disc_wgan_gp_loss": 1})
         self.assertEqual((totals["tldr_te_loss"] / counts["tldr_te_loss"]).item(), 3.0)
         self.assertEqual((totals["disc_wgan_gp_loss"] / counts["disc_wgan_gp_loss"]).item(), 6.0)
+
+    @patch("humanoidverse.training.workspace.wandb.log")
+    def test_distributed_evaluation_does_not_block_on_wandb(self, wandb_log: Mock) -> None:
+        published = _log_evaluation_metrics_to_wandb(
+            enabled=True,
+            distributed_sync=True,
+            evaluation_name="tracking",
+            metrics={"emd": 1.25},
+            step=0,
+        )
+
+        self.assertFalse(published)
+        wandb_log.assert_not_called()
+
+    @patch("humanoidverse.training.workspace.wandb.log")
+    def test_single_process_evaluation_still_logs_to_wandb(self, wandb_log: Mock) -> None:
+        published = _log_evaluation_metrics_to_wandb(
+            enabled=True,
+            distributed_sync=False,
+            evaluation_name="tracking",
+            metrics={"emd": 1.25},
+            step=42,
+        )
+
+        self.assertTrue(published)
+        wandb_log.assert_called_once_with({"eval/tracking/emd": 1.25}, step=42)
 
 
 if __name__ == "__main__":

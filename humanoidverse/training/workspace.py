@@ -94,6 +94,24 @@ def _accumulate_metrics(
     return total_metrics, metric_update_counts
 
 
+def _log_evaluation_metrics_to_wandb(
+    *,
+    enabled: bool,
+    distributed_sync: bool,
+    evaluation_name: str,
+    metrics: dict[str, tp.Any] | None,
+    step: int,
+) -> bool:
+    """Publish evaluation metrics unless rank-0 telemetry could block a distributed barrier."""
+    if not enabled or metrics is None:
+        return False
+    if distributed_sync:
+        print(f"[INFO] Skipping synchronous evaluation W&B logging at time {step} in distributed mode")
+        return False
+    wandb.log({f"eval/{evaluation_name}/{key}": value for key, value in metrics.items()}, step=step)
+    return True
+
+
 class TrainConfig(BaseConfig):
     # The "pydantic.Field" field is used to explicitely tell which field is the discriminative
     # feature
@@ -724,12 +742,18 @@ class Workspace:
                 run_eval_on_this_rank = (not self.cfg.distributed_sync) or self.distributed_rank == 0
                 if run_eval_on_this_rank:
                     eval_metrics = self.eval(global_time, replay_buffer=replay_buffer)
+                    if self.cfg.distributed_sync:
+                        print(f"[INFO] Rank 0 evaluation returned at time {global_time}; entering distributed barrier")
                 if self.cfg.distributed_sync:
                     barrier()
+                    if self.distributed_rank == 0:
+                        print(f"[INFO] Distributed post-evaluation barrier completed at time {global_time}")
                 eval_time_checker.update_last_step(global_time)
                 if uses_humanoidverse_eval:
                     # reset if there is a humanoidverse evaluation
                     td, info = train_env.reset()
+                    if self.distributed_rank == 0:
+                        print(f"[INFO] Post-evaluation environment reset completed at time {global_time}")
                     if self.cfg.fail_on_nonfinite:
                         _assert_finite(
                             td,
@@ -1086,11 +1110,17 @@ class Workspace:
                     logger=logger,
                 )
             # For wandb dict, put it on wandb
-            if self._write_shared_artifacts and self.cfg.use_wandb and wandb_dict is not None:
-                wandb.log(
-                    {f"eval/{evaluation_name}/{k}": v for k, v in wandb_dict.items()},
-                    step=t,
-                )
+            # This call runs only on rank 0, immediately before every other
+            # rank waits in the post-evaluation NCCL barrier. Synchronized
+            # jobs keep W&B for training metrics but retain evaluation metrics
+            # in the CSV logger instead of risking a rank-0 telemetry stall.
+            _log_evaluation_metrics_to_wandb(
+                enabled=self._write_shared_artifacts and self.cfg.use_wandb,
+                distributed_sync=self.cfg.distributed_sync,
+                evaluation_name=evaluation_name,
+                metrics=wandb_dict,
+                step=t,
+            )
 
             evaluation_results[evaluation_name] = evaluation_metrics
 

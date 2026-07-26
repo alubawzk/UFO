@@ -18,7 +18,7 @@ terrain:
   border_size: 20.0
   num_rows: 10
   num_cols: 20
-  horizontal_scale: 0.05
+  horizontal_scale: 0.1
   vertical_scale: 0.005
   max_init_terrain_level: null
   use_cache: false
