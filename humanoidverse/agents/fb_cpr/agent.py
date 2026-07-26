@@ -354,6 +354,12 @@ class FBcprAgent(FBAgent):
         self.discriminator_optimizer.zero_grad(set_to_none=True)
         loss.backward()
         average_gradients(self._model._discriminator.parameters())
+        if self.cfg.train.clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self._model._discriminator.parameters(),
+                self.cfg.train.clip_grad_norm,
+                error_if_nonfinite=True,
+            )
         self.discriminator_optimizer.step()
 
         with torch.no_grad():
@@ -394,6 +400,12 @@ class FBcprAgent(FBAgent):
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
         average_gradients(self._model._critic.parameters())
+        if self.cfg.train.clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self._model._critic.parameters(),
+                self.cfg.train.clip_grad_norm,
+                error_if_nonfinite=True,
+            )
         self.critic_optimizer.step()
 
         with torch.no_grad():
@@ -435,7 +447,7 @@ class FBcprAgent(FBAgent):
         actor_loss.backward()
         average_gradients(self._model._actor.parameters())
         if clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm, error_if_nonfinite=True)
         self.actor_optimizer.step()
 
         with torch.no_grad():

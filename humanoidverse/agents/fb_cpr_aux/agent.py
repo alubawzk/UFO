@@ -250,6 +250,12 @@ class FBcprAuxAgent(FBcprAgent):
         self.aux_critic_optimizer.zero_grad(set_to_none=True)
         aux_critic_loss.backward()
         average_gradients(self._model._aux_critic.parameters())
+        if self.cfg.train.clip_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self._model._aux_critic.parameters(),
+                self.cfg.train.clip_grad_norm,
+                error_if_nonfinite=True,
+            )
         self.aux_critic_optimizer.step()
 
         with torch.no_grad():
@@ -298,7 +304,7 @@ class FBcprAuxAgent(FBcprAgent):
         actor_loss.backward()
         average_gradients(self._model._actor.parameters())
         if clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm, error_if_nonfinite=True)
         self.actor_optimizer.step()
 
         with torch.no_grad():

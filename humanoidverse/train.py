@@ -498,7 +498,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-dr", action="store_true", help="Disable domain randomization for training.")
     parser.add_argument("--disable-obs-noise", action="store_true", help="Disable observation noise for training.")
     parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TeCH preset ignores this value.")
-    parser.add_argument("--clip-grad-norm", type=float, default=0.0, help="Enable FB actor/FB gradient clipping when > 0.")
+    parser.add_argument(
+        "--clip-grad-norm",
+        type=float,
+        default=0.0,
+        help="Clip FB, actor, discriminator, critic, and auxiliary-critic gradients when > 0.",
+    )
     parser.add_argument(
         "--cartwheel-aux-safe",
         action="store_true",
