@@ -762,15 +762,9 @@ class Workspace:
                     td, info = train_env.reset()
                     if self.distributed_rank == 0:
                         print(f"[INFO] Post-evaluation environment reset completed at time {global_time}")
-                    if self.cfg.fail_on_nonfinite:
-                        _assert_finite(
-                            td,
-                            label="env.post_eval_reset.obs",
-                            rank=self.distributed_rank,
-                            local_time=local_time,
-                            global_time=global_time,
-                            optimizer_steps=self._optimizer_steps,
-                        )
+                    # The initial reset and the first rollout both validate observations.
+                    # Avoid an additional rank-asymmetric synchronization point immediately
+                    # after rank 0 returns from the long tracking evaluation.
                     terminated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     truncated = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
                     done = np.zeros(self.cfg.online_parallel_envs, dtype=bool)
