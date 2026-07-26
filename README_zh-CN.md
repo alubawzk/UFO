@@ -237,6 +237,35 @@ nohup bash -lc '
 ' > /home/wzk/UFO/ufo_fb_lafan1_mini3_AddJointParams.log 2>&1 &
 
 ## Fine-tune
+
+# 从 ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new 初始化模型权重，
+# 使用当前 Mini3 BF 的完整域随机化、地形、观测噪声和 Lie-down reset 继续训练。
+nohup bash -lc '
+  cd /home/wzk/UFO &&
+  source /root/.local/bin/env &&
+  source .venv/bin/activate &&
+  export PYTHONUNBUFFERED=1 &&
+  export WANDB_ENTITY="ricardo_wzk-soochow-university" &&
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ./run_train.sh \
+    --agent fb \
+    --robot-config configs/robots/mini3.yaml \
+    --data-manifest configs/data/lafan1_mini3.yaml \
+    --gpu-ids all \
+    --init-checkpoint runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new \
+    --lr-scale 0.25 \
+    --num-envs 1024 \
+    --num-env-steps 192000000 \
+    --buffer-size 1500000 \
+    --checkpoint-every-steps 3200000 \
+    --work-dir runs/Align_DR_Terrain \
+    --no-checkpoint-buffer \
+    --use-wandb \
+    --wandb-run-name Align_DR_Terrain
+' > /home/wzk/UFO/Align_DR_Terrain.log 2>&1 &
+
+# --init-checkpoint 只加载源 run 的模型权重，不恢复 optimizer、replay buffer 和训练步数。
+# 新的 --work-dir 必须与源 run 不同，并且不能预先包含 checkpoint。
+
 # --init-checkpoint runs/Revise_torque_limit \
 nohup bash -lc '
   cd /home/wzk/UFO &&

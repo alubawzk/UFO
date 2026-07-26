@@ -54,6 +54,7 @@ training:
     # 500 Hz physics with a 50 Hz policy/control update.
     - "simulator.config.sim.fps=500"
     - "simulator.config.sim.control_decimation=10"
+    - "env.config.env_spacing=2.5"
 
     # Lie down init
     - "env.config.lie_down_init=True"
@@ -65,19 +66,9 @@ training:
     - "rewards.reward_scales.penalty_ankle_roll=-1.0"
     - "rewards.reward_penalty_curriculum=false"
 
-    # Domain randomization
-    - "domain_rand.push_robots=true"
-    - "domain_rand.randomize_base_com=true"
-    - "domain_rand.base_com_range.x=[-0.03,0.03]"
-    - "domain_rand.base_com_range.y=[-0.03,0.03]"
-    - "domain_rand.link_mass_range=[0.98,1.02]"
-    - "domain_rand.friction_range=[0.5,2.2]"
-    - "domain_rand.randomize_pd_gain=true"
-    - "domain_rand.kp_range=[0.75,1.25]"
-    - "domain_rand.kd_range=[0.75,1.25]"
-    - "domain_rand.randomize_ctrl_delay=true"
-    - "domain_rand.randomize_motor_strength=true"
-    - "domain_rand.motor_strength_range=[0.9,1.1]"
+    # Mini3-BeyondMimic-RealMotor domain randomization and terrain.
+    - "domain_rand=domain_rand_mini3_beyondmimic_real_motor"
+    - "terrain=terrain_mini3_beyondmimic"
   agent:
     fb:
       # These scales override the FB auxiliary critic preset, not only the
@@ -90,7 +81,7 @@ training:
   # The buffer advances at 500 Hz; only the actor's angular velocity and
   # projected gravity are delayed. Privileged state and rewards stay current.
   imu_delay:
-    enabled: false
+    enabled: true
     time_range_s: [0.008, 0.026]
     randomize_on_reset: true
     interpolate: true
@@ -255,8 +246,8 @@ training:
           - right_shoulder_roll_joint
           - right_shoulder_yaw_joint
           - right_elbow_pitch_joint
-        min_delay: 0
-        max_delay: 0
+        min_delay: 3
+        max_delay: 5
     joints:
       left_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
       left_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}

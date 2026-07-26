@@ -34,6 +34,7 @@ from humanoidverse.utils.reference_observations import build_clean_discriminator
 from humanoidverse.utils.torch_utils import (
     my_quat_rotate,
     quat_from_angle_axis,
+    quat_from_euler_xyz,
     quat_mul,
     quat_rotate_inverse,
     wrap_to_pi,
@@ -384,6 +385,163 @@ def _randomize_dc_motor_strength(env, env_ids, strength_range: tuple[float, floa
         actuator._vel_at_effort_lim[env_ids] = actuator.velocity_limit_motor[env_ids] * (1.0 + force_limit / saturation_effort)
 
 
+def _randomize_mini3_actuator_gains(
+    env,
+    env_ids,
+    *,
+    non_ankle_kp_range: tuple[float, float],
+    non_ankle_kd_range: tuple[float, float],
+    ankle_kp_range: tuple[float, float],
+    ankle_kd_range: tuple[float, float],
+    asset_cfg,
+) -> None:
+    """Apply the Mini3 BeyondMimic startup gain ranges per actuator target."""
+    from mjlab.actuator import IdealPdActuator
+
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.long)
+
+    for actuator in asset.actuators:
+        if not isinstance(actuator, IdealPdActuator):
+            raise TypeError(f"Mini3 PD-gain randomization requires IdealPdActuator, got {type(actuator).__name__}")
+        assert actuator.default_stiffness is not None
+        assert actuator.default_damping is not None
+
+        ankle_mask = torch.tensor(["_ankle_" in name for name in actuator.target_names], device=env.device, dtype=torch.bool)
+        kp_lower = torch.where(
+            ankle_mask,
+            torch.tensor(ankle_kp_range[0], device=env.device),
+            torch.tensor(non_ankle_kp_range[0], device=env.device),
+        )
+        kp_upper = torch.where(
+            ankle_mask,
+            torch.tensor(ankle_kp_range[1], device=env.device),
+            torch.tensor(non_ankle_kp_range[1], device=env.device),
+        )
+        kd_lower = torch.where(
+            ankle_mask,
+            torch.tensor(ankle_kd_range[0], device=env.device),
+            torch.tensor(non_ankle_kd_range[0], device=env.device),
+        )
+        kd_upper = torch.where(
+            ankle_mask,
+            torch.tensor(ankle_kd_range[1], device=env.device),
+            torch.tensor(non_ankle_kd_range[1], device=env.device),
+        )
+        sample_shape = (env_ids.numel(), len(actuator.target_names))
+        kp_scale = kp_lower + torch.rand(sample_shape, device=env.device) * (kp_upper - kp_lower)
+        kd_scale = kd_lower + torch.rand(sample_shape, device=env.device) * (kd_upper - kd_lower)
+        actuator.set_gains(
+            env_ids,
+            kp=actuator.default_stiffness[env_ids] * kp_scale,
+            kd=actuator.default_damping[env_ids] * kd_scale,
+        )
+
+
+def _randomize_body_mass_and_inertia(
+    env,
+    env_ids,
+    *,
+    ranges: tuple[float, float],
+    operation: str,
+    asset_cfg,
+) -> None:
+    """Match Isaac Lab mass DR, including its default inertia recomputation."""
+    from mjlab.envs.mdp.dr._core import _get_entity_indices, _select_default_values
+
+    if operation not in ("add", "scale"):
+        raise ValueError(f"Mass randomization operation must be 'add' or 'scale', got {operation!r}")
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.long)
+    body_ids = _get_entity_indices(asset.indexing, asset_cfg, "body", False).to(device=env.device, dtype=torch.long)
+
+    default_mass = _select_default_values(env, "body_mass", env_ids, body_ids)
+    default_inertia = _select_default_values(env, "body_inertia", env_ids, body_ids)
+    samples = torch.empty_like(default_mass).uniform_(float(ranges[0]), float(ranges[1]))
+    if operation == "scale":
+        new_mass = default_mass * samples
+    else:
+        new_mass = default_mass + samples
+    new_mass = torch.clamp(new_mass, min=1.0e-6)
+    inertia_scale = new_mass / default_mass
+
+    env_grid, body_grid = torch.meshgrid(env_ids, body_ids, indexing="ij")
+    env.sim.model.body_mass[env_grid, body_grid] = new_mass
+    env.sim.model.body_inertia[env_grid, body_grid] = default_inertia * inertia_scale.unsqueeze(-1)
+
+
+def _randomize_mini3_rigid_body_material(
+    env,
+    env_ids,
+    *,
+    static_friction_range: tuple[float, float],
+    dynamic_friction_range: tuple[float, float],
+    restitution_range: tuple[float, float],
+    num_buckets: int,
+    asset_cfg,
+) -> None:
+    """Map BeyondMimic's bucketed material DR to MuJoCo contact friction.
+
+    MuJoCo exposes one tangential Coulomb-friction coefficient rather than
+    separate static and dynamic coefficients. The dynamic-friction buckets
+    are therefore the physically active mapping. The static/restitution
+    ranges remain explicit parameters so the cross-engine limitation cannot
+    silently change the source task specification.
+    """
+    del static_friction_range, restitution_range
+    if num_buckets <= 0:
+        raise ValueError(f"num_buckets must be positive, got {num_buckets}")
+
+    from mjlab.envs.mdp.dr._core import _get_entity_indices
+
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.long)
+    geom_ids = _get_entity_indices(asset.indexing, asset_cfg, "geom", False).to(device=env.device, dtype=torch.long)
+
+    buckets = torch.linspace(
+        float(dynamic_friction_range[0]),
+        float(dynamic_friction_range[1]),
+        steps=num_buckets,
+        device=env.device,
+    )
+    bucket_ids = torch.randint(num_buckets, (env_ids.numel(), geom_ids.numel()), device=env.device)
+    env_grid, geom_grid = torch.meshgrid(env_ids, geom_ids, indexing="ij")
+    env.sim.model.geom_friction[env_grid, geom_grid, 0] = buckets[bucket_ids]
+
+
+# EventManager uses this marker to allocate per-environment model storage.
+_randomize_mini3_rigid_body_material.model_fields = ("geom_friction",)
+
+
+def _terrain_levels_tracking(env, env_ids) -> torch.Tensor:
+    """Promote time-outs and demote early terminations on generated terrain."""
+    if isinstance(env_ids, slice):
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)[env_ids]
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.long)
+    terrain = env.scene.terrain
+    if terrain is None:
+        raise RuntimeError("terrain_levels_tracking requires an active terrain entity")
+
+    if not hasattr(env, "reset_time_outs"):
+        move_up = torch.zeros(env_ids.numel(), dtype=torch.bool, device=env.device)
+        move_down = torch.zeros_like(move_up)
+    else:
+        move_up = env.reset_time_outs[env_ids]
+        move_down = env.reset_terminated[env_ids] & ~move_up
+    terrain.update_env_origins(env_ids, move_up, move_down)
+    return torch.mean(terrain.terrain_levels.float())
+
+
 def _to_float_dict(value) -> dict[str, float]:
     value = OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
     return {str(k): float(v) for k, v in value.items()}
@@ -661,9 +819,13 @@ def _compose_humanoidverse_config(
         cfg.domain_rand.randomize_ctrl_delay = False
         cfg.domain_rand.randomize_pd_gain = False
         cfg.domain_rand.randomize_motor_strength = False
+        cfg.domain_rand.randomize_joint_parameters = False
+        cfg.domain_rand.randomize_rigid_body_material = False
+        cfg.domain_rand.randomize_base_mass = False
         cfg.domain_rand.randomize_base_com = False
         cfg.domain_rand.randomize_link_mass = False
         cfg.domain_rand.randomize_friction = False
+        cfg.domain_rand.randomize_initial_state = False
         cfg.domain_rand.randomize_torque_rfi = False
         cfg.domain_rand.randomize_rfi_lim = False
         cfg.domain_rand.randomize_push_robots = False
@@ -706,7 +868,8 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.envs.mdp import dr as mjlab_dr
     from mjlab.envs.mdp import terminations as mjlab_terminations
     from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
-    from mjlab.managers.event_manager import EventTermCfg
+    from mjlab.managers.curriculum_manager import CurriculumTermCfg
+    from mjlab.managers.event_manager import EventTermCfg, RecomputeLevel
     from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
     from mjlab.managers.reward_manager import RewardTermCfg
     from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -714,12 +877,28 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.scene import SceneCfg
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
-    from mjlab.terrains import TerrainEntityCfg
+    from mjlab.terrains import (
+        HfRandomUniformTerrainCfg,
+        HfWaveTerrainCfg,
+        TerrainEntityCfg,
+        TerrainGeneratorCfg,
+    )
 
     from humanoidverse.agents.envs.mini3_real_motor_actuator import (
         Mini3ParallelAnkleRealMotorActuatorCfg,
         Mini3RealMotorActuatorCfg,
     )
+
+    _randomize_body_mass_and_inertia.model_fields = (
+        "body_mass",
+        "body_inertia",
+        "body_subtreemass",
+        "dof_invweight0",
+        "body_invweight0",
+        "tendon_length0",
+        "tendon_invweight0",
+    )
+    _randomize_body_mass_and_inertia.recompute = RecomputeLevel.set_const
 
     class SimulationStepDelayedJointPositionAction(JointPositionAction):
         """Joint-position action whose FIFO advances on every physics step."""
@@ -985,21 +1164,28 @@ def make_mjlab_ufo_env_cfg(
         "time_out": TerminationTermCfg(func=mjlab_terminations.time_out, time_out=True),
     }
     events = {}
+    domain_rand_profile = str(domain_rand.get("profile", "default"))
+    is_mini3_beyondmimic = domain_rand_profile == "mini3_beyondmimic_real_motor"
     if bool(domain_rand.get("push_robots", False)):
-        max_push_vel_xy = float(domain_rand.max_push_vel_xy)
-        max_push_ang_vel = float(domain_rand.get("max_push_ang_vel", 0.0))
-        velocity_range = {
-            "x": (-max_push_vel_xy, max_push_vel_xy),
-            "y": (-max_push_vel_xy, max_push_vel_xy),
-        }
-        if max_push_ang_vel > 0.0:
-            velocity_range.update(
-                {
-                    "roll": (-max_push_ang_vel, max_push_ang_vel),
-                    "pitch": (-max_push_ang_vel, max_push_ang_vel),
-                    "yaw": (-max_push_ang_vel, max_push_ang_vel),
-                }
-            )
+        if domain_rand.get("push_velocity_range") is not None:
+            velocity_range = {
+                str(axis): tuple(float(x) for x in _to_list(value)) for axis, value in domain_rand.push_velocity_range.items()
+            }
+        else:
+            max_push_vel_xy = float(domain_rand.max_push_vel_xy)
+            max_push_ang_vel = float(domain_rand.get("max_push_ang_vel", 0.0))
+            velocity_range = {
+                "x": (-max_push_vel_xy, max_push_vel_xy),
+                "y": (-max_push_vel_xy, max_push_vel_xy),
+            }
+            if max_push_ang_vel > 0.0:
+                velocity_range.update(
+                    {
+                        "roll": (-max_push_ang_vel, max_push_ang_vel),
+                        "pitch": (-max_push_ang_vel, max_push_ang_vel),
+                        "yaw": (-max_push_ang_vel, max_push_ang_vel),
+                    }
+                )
         events["push_robots"] = EventTermCfg(
             func=mjlab_mdp.push_by_setting_velocity,
             mode="interval",
@@ -1007,16 +1193,30 @@ def make_mjlab_ufo_env_cfg(
             params={"velocity_range": velocity_range},
         )
     if bool(domain_rand.get("randomize_pd_gain", False)):
-        events["random_pd_gains"] = EventTermCfg(
-            mode="reset",
-            func=mjlab_dr.pd_gains,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "kp_range": _positive_scale_range(domain_rand.kp_range, "domain_rand.kp_range"),
-                "kd_range": _positive_scale_range(domain_rand.kd_range, "domain_rand.kd_range"),
-                "operation": "scale",
-            },
-        )
+        if is_mini3_beyondmimic:
+            pd_gain = domain_rand.pd_gain
+            events["random_pd_gains"] = EventTermCfg(
+                mode="startup",
+                func=_randomize_mini3_actuator_gains,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "non_ankle_kp_range": _positive_scale_range(pd_gain.non_ankle.kp_range, "domain_rand.pd_gain.non_ankle.kp_range"),
+                    "non_ankle_kd_range": _positive_scale_range(pd_gain.non_ankle.kd_range, "domain_rand.pd_gain.non_ankle.kd_range"),
+                    "ankle_kp_range": _positive_scale_range(pd_gain.ankle.kp_range, "domain_rand.pd_gain.ankle.kp_range"),
+                    "ankle_kd_range": _positive_scale_range(pd_gain.ankle.kd_range, "domain_rand.pd_gain.ankle.kd_range"),
+                },
+            )
+        else:
+            events["random_pd_gains"] = EventTermCfg(
+                mode="reset",
+                func=mjlab_dr.pd_gains,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "kp_range": _positive_scale_range(domain_rand.kp_range, "domain_rand.kp_range"),
+                    "kd_range": _positive_scale_range(domain_rand.kd_range, "domain_rand.kd_range"),
+                    "operation": "scale",
+                },
+            )
     if bool(domain_rand.get("randomize_motor_strength", False)):
         events["random_motor_strength"] = EventTermCfg(
             mode="reset",
@@ -1029,13 +1229,29 @@ def make_mjlab_ufo_env_cfg(
                 ),
             },
         )
+    if bool(domain_rand.get("randomize_base_mass", False)):
+        body_names = tuple(str(name) for name in _to_list(domain_rand.get("base_mass_body_names")))
+        if not body_names:
+            body_names = (str(config.robot.torso_name),)
+        events["random_base_mass"] = EventTermCfg(
+            mode="startup",
+            func=_randomize_body_mass_and_inertia if is_mini3_beyondmimic else mjlab_dr.body_mass,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=body_names),
+                "operation": "add",
+                "ranges": tuple(float(x) for x in _to_list(domain_rand.base_mass_range)),
+            },
+        )
     if bool(domain_rand.get("randomize_base_com", False)):
         base_com_range = domain_rand.base_com_range
+        body_names = tuple(str(name) for name in _to_list(domain_rand.get("base_com_body_names")))
+        if not body_names:
+            body_names = (str(config.robot.torso_name),)
         events["random_base_com"] = EventTermCfg(
             mode="startup",
             func=mjlab_dr.body_com_offset,
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=(str(config.robot.torso_name),)),
+                "asset_cfg": SceneEntityCfg("robot", body_names=body_names),
                 "operation": "add",
                 "ranges": {
                     0: tuple(float(x) for x in _to_list(base_com_range.x)),
@@ -1045,16 +1261,31 @@ def make_mjlab_ufo_env_cfg(
             },
         )
     if bool(domain_rand.get("randomize_link_mass", False)):
+        body_names = domain_rand.get("link_mass_body_names")
+        body_names = tuple(str(name) for name in _to_list(body_names)) if body_names is not None else ".*"
         events["random_link_mass"] = EventTermCfg(
             mode="startup",
-            func=mjlab_dr.body_mass,
+            func=_randomize_body_mass_and_inertia if is_mini3_beyondmimic else mjlab_dr.body_mass,
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+                "asset_cfg": SceneEntityCfg("robot", body_names=body_names),
                 "operation": "scale",
                 "ranges": tuple(float(x) for x in _to_list(domain_rand.link_mass_range)),
             },
         )
-    if bool(domain_rand.get("randomize_friction", False)):
+    if bool(domain_rand.get("randomize_rigid_body_material", False)):
+        material = domain_rand.rigid_body_material
+        events["random_rigid_body_material"] = EventTermCfg(
+            mode="startup",
+            func=_randomize_mini3_rigid_body_material,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", geom_names=".*"),
+                "static_friction_range": tuple(float(x) for x in _to_list(material.static_friction_range)),
+                "dynamic_friction_range": tuple(float(x) for x in _to_list(material.dynamic_friction_range)),
+                "restitution_range": tuple(float(x) for x in _to_list(material.restitution_range)),
+                "num_buckets": int(material.num_buckets),
+            },
+        )
+    elif bool(domain_rand.get("randomize_friction", False)):
         events["random_geom_friction"] = EventTermCfg(
             mode="startup",
             func=mjlab_dr.geom_friction,
@@ -1065,13 +1296,85 @@ def make_mjlab_ufo_env_cfg(
                 "ranges": tuple(float(x) for x in _to_list(domain_rand.friction_range)),
             },
         )
+    if bool(domain_rand.get("randomize_joint_parameters", False)):
+        joint_parameters = domain_rand.joint_parameters
+        joint_groups = {
+            "non_ankle": (r"^(?!.*ankle).*_joint$", joint_parameters.non_ankle),
+            "ankle": (r".*_ankle_(?:pitch|roll)_joint$", joint_parameters.ankle),
+        }
+        for group_name, (joint_pattern, ranges) in joint_groups.items():
+            asset_cfg = SceneEntityCfg("robot", joint_names=(joint_pattern,))
+            events[f"random_{group_name}_joint_friction"] = EventTermCfg(
+                mode="startup",
+                func=mjlab_dr.joint_friction,
+                params={
+                    "asset_cfg": asset_cfg,
+                    "operation": "scale",
+                    "ranges": tuple(float(x) for x in _to_list(ranges.friction_range)),
+                },
+            )
+            events[f"random_{group_name}_joint_armature"] = EventTermCfg(
+                mode="startup",
+                func=mjlab_dr.joint_armature,
+                params={
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=(joint_pattern,)),
+                    "operation": "scale",
+                    "ranges": tuple(float(x) for x in _to_list(ranges.armature_range)),
+                },
+            )
+
+    terrain_cfg = TerrainEntityCfg(terrain_type="plane", env_spacing=float(config.env_spacing))
+    curriculum = {}
+    terrain_profile = str(config.terrain.get("profile", "plane"))
+    if terrain_profile == "mini3_beyondmimic":
+        terrain = config.terrain
+        num_cols = int(terrain.num_cols)
+        wave_cols = int(round(num_cols * float(terrain.sub_terrains.wave.proportion)))
+        random_rough_cols = num_cols - wave_cols
+        column_proportion = 1.0 / num_cols
+        sub_terrains = {}
+        for column in range(wave_cols):
+            sub_terrains[f"wave_{column:02d}"] = HfWaveTerrainCfg(
+                proportion=column_proportion,
+                amplitude_range=tuple(float(x) for x in _to_list(terrain.sub_terrains.wave.amplitude_range)),
+                num_waves=int(terrain.sub_terrains.wave.num_waves),
+                horizontal_scale=float(terrain.horizontal_scale),
+                vertical_scale=float(terrain.vertical_scale),
+                border_width=float(terrain.sub_terrains.wave.border_width),
+            )
+        for column in range(random_rough_cols):
+            sub_terrains[f"random_rough_{column:02d}"] = HfRandomUniformTerrainCfg(
+                proportion=column_proportion,
+                noise_range=tuple(float(x) for x in _to_list(terrain.sub_terrains.random_rough.noise_range)),
+                noise_step=float(terrain.sub_terrains.random_rough.noise_step),
+                horizontal_scale=float(terrain.horizontal_scale),
+                vertical_scale=float(terrain.vertical_scale),
+                border_width=float(terrain.sub_terrains.random_rough.border_width),
+            )
+        terrain_generator = TerrainGeneratorCfg(
+            curriculum=bool(terrain.curriculum),
+            size=(float(terrain.terrain_length), float(terrain.terrain_width)),
+            border_width=float(terrain.border_size),
+            num_rows=int(terrain.num_rows),
+            num_cols=num_cols,
+            color_scheme=str(terrain.get("color_scheme", "none")),
+            sub_terrains=sub_terrains,
+        )
+        terrain_cfg = TerrainEntityCfg(
+            terrain_type="generator",
+            terrain_generator=terrain_generator,
+            env_spacing=float(config.env_spacing),
+            max_init_terrain_level=None if terrain.get("max_init_terrain_level") is None else int(terrain.max_init_terrain_level),
+        )
+        if bool(terrain.curriculum):
+            curriculum["terrain_levels"] = CurriculumTermCfg(func=_terrain_levels_tracking)
 
     return ManagerBasedRlEnvCfg(
         decimation=int(config.simulator.config.sim.control_decimation),
         scene=SceneCfg(
             num_envs=num_envs,
             env_spacing=float(config.env_spacing),
-            terrain=TerrainEntityCfg(terrain_type="plane", env_spacing=float(config.env_spacing)),
+            terrain=terrain_cfg,
             entities={"robot": robot_cfg},
             sensors=sensors,
         ),
@@ -1080,6 +1383,7 @@ def make_mjlab_ufo_env_cfg(
         rewards=rewards,
         terminations=terminations,
         events=events,
+        curriculum=curriculum,
         seed=seed,
         sim=SimulationCfg(
             nconmax=512,
@@ -1171,6 +1475,14 @@ class HumanoidVerseMjlabCore:
 
         self.default_dof_pos = _default_joint_pos(hv_config).to(self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.default_dof_pos_offset = torch.zeros(self.num_envs, self.num_dof, device=self.device)
+        self._default_dof_pos_randomization_mode = str(self.config.domain_rand.get("default_dof_pos_randomization_mode", "reset"))
+        if self._default_dof_pos_randomization_mode not in ("startup", "reset"):
+            raise ValueError(
+                "domain_rand.default_dof_pos_randomization_mode must be 'startup' or 'reset', "
+                f"got {self._default_dof_pos_randomization_mode!r}"
+            )
+        if self._default_dof_pos_randomization_mode == "startup":
+            self._randomize_default_dof_pos_offset(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
         self.action_target_scale = _action_target_scale(hv_config).to(self.device).unsqueeze(0)
         self.gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).repeat(self.num_envs, 1)
         self.forward_vec = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
@@ -1665,7 +1977,8 @@ class HumanoidVerseMjlabCore:
         if len(env_ids) == 0:
             return
         self.mjlab_env.reset(env_ids=env_ids)
-        self._randomize_default_dof_pos_offset(env_ids)
+        if self._default_dof_pos_randomization_mode == "reset":
+            self._randomize_default_dof_pos_offset(env_ids)
         if target_states is not None:
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
             dof_state = target_states["dof_states"][env_ids].to(self.device, dtype=torch.float32)
@@ -1675,49 +1988,109 @@ class HumanoidVerseMjlabCore:
             self._resample_motion_time_and_ids(env_ids)
             motion_times = self.motion_start_times[env_ids]
             motion_res = self._motion_lib.get_motion_state(self.motion_ids[env_ids], motion_times, offset=self.env_origins[env_ids])
-            root_pos = motion_res["root_pos"]
-            root_pos[:, 2] += 0.01
-            root_rot = motion_res["root_rot"]
-            root_vel = motion_res["root_vel"]
-            root_ang_vel = motion_res["root_ang_vel"]
-            if self.config.get("lie_down_init", False):
-                mask = torch.rand(len(env_ids), device=self.device) < float(getattr(self.config, "lie_down_init_prob", 0.0))
-                if torch.any(mask):
-                    root_pos = root_pos.clone()
-                    root_rot = root_rot.clone()
-                    root_pos[mask, 2] = float(self.config.get("lie_down_init_height", 0.5))
-                    sign = 1 if random.random() < 0.5 else -1
-                    rot_quat = quat_from_angle_axis(
-                        torch.tensor(sign * (-torch.pi / 2), device=self.device),
-                        torch.tensor([1.0, 0.0, 0.0], device=self.device),
+            root_pos = motion_res["root_pos"].clone()
+            root_rot = motion_res["root_rot"].clone()
+            root_vel = motion_res["root_vel"].clone()
+            root_ang_vel = motion_res["root_ang_vel"].clone()
+            joint_pos = motion_res["dof_pos"].clone()
+            joint_vel = motion_res["dof_vel"].clone()
+
+            reset_state = self.config.domain_rand.get("reset_state")
+            if reset_state is not None:
+                root_pos[:, 2] += float(reset_state.get("reset_root_height_offset", 0.0))
+                if bool(self.config.domain_rand.get("randomize_initial_state", False)):
+                    pose_keys = ("x", "y", "z", "roll", "pitch", "yaw")
+                    pose_ranges = torch.tensor(
+                        [_to_list(reset_state.pose_range.get(key, (0.0, 0.0))) for key in pose_keys],
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    pose_samples = pose_ranges[:, 0] + torch.rand(len(env_ids), len(pose_keys), device=self.device) * (
+                        pose_ranges[:, 1] - pose_ranges[:, 0]
+                    )
+                    root_pos += pose_samples[:, :3]
+                    root_rot = quat_mul(
+                        quat_from_euler_xyz(pose_samples[:, 3], pose_samples[:, 4], pose_samples[:, 5]),
+                        root_rot,
                         w_last=True,
                     )
-                    root_rot[mask] = quat_mul(rot_quat.expand_as(root_rot[mask]), root_rot[mask], w_last=True)
-            root_pos = root_pos + torch.randn_like(root_pos) * float(self.config.init_noise_scale.root_pos) * float(
-                self.config.noise_to_initial_level
-            )
-            root_rot = quat_mul(
-                _small_random_quaternions(
-                    len(env_ids),
-                    float(self.config.init_noise_scale.root_rot) * 3.14 / 180.0 * float(self.config.noise_to_initial_level),
-                    self.device,
-                ),
-                root_rot,
-                w_last=True,
-            )
-            root_vel = root_vel + torch.randn_like(root_vel) * float(self.config.init_noise_scale.root_vel) * float(
-                self.config.noise_to_initial_level
-            )
-            root_ang_vel = root_ang_vel + torch.randn_like(root_ang_vel) * float(self.config.init_noise_scale.root_ang_vel) * float(
-                self.config.noise_to_initial_level
-            )
+
+                    velocity_keys = ("x", "y", "z", "roll", "pitch", "yaw")
+                    velocity_ranges = torch.tensor(
+                        [_to_list(reset_state.velocity_range.get(key, (0.0, 0.0))) for key in velocity_keys],
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    velocity_samples = velocity_ranges[:, 0] + torch.rand(len(env_ids), len(velocity_keys), device=self.device) * (
+                        velocity_ranges[:, 1] - velocity_ranges[:, 0]
+                    )
+                    root_vel += velocity_samples[:, :3]
+                    root_ang_vel += velocity_samples[:, 3:]
+
+                    joint_range = tuple(float(value) for value in _to_list(reset_state.joint_position_range))
+                    joint_pos += torch.empty_like(joint_pos).uniform_(*joint_range)
+                    soft_limit_factor = float(reset_state.get("soft_joint_pos_limit_factor", 1.0))
+                    limit_center = self.hard_dof_pos_limits.mean(dim=-1)
+                    limit_radius = (self.hard_dof_pos_limits[:, 1] - self.hard_dof_pos_limits[:, 0]) * 0.5
+                    soft_lower = limit_center - limit_radius * soft_limit_factor
+                    soft_upper = limit_center + limit_radius * soft_limit_factor
+                    joint_pos = torch.clamp(joint_pos, min=soft_lower, max=soft_upper)
+
+                # UFO-specific extension retained by request. It is applied
+                # after the BeyondMimic reset perturbation so the selected
+                # environments keep the configured lie-down height/orientation.
+                if self.config.get("lie_down_init", False):
+                    mask = torch.rand(len(env_ids), device=self.device) < float(getattr(self.config, "lie_down_init_prob", 0.0))
+                    if torch.any(mask):
+                        root_pos[mask, 2] = float(self.config.get("lie_down_init_height", 0.5))
+                        sign = 1 if random.random() < 0.5 else -1
+                        rot_quat = quat_from_angle_axis(
+                            torch.tensor(sign * (-torch.pi / 2), device=self.device),
+                            torch.tensor([1.0, 0.0, 0.0], device=self.device),
+                            w_last=True,
+                        )
+                        root_rot[mask] = quat_mul(rot_quat.expand_as(root_rot[mask]), root_rot[mask], w_last=True)
+            else:
+                root_pos[:, 2] += 0.01
+                if self.config.get("lie_down_init", False):
+                    mask = torch.rand(len(env_ids), device=self.device) < float(getattr(self.config, "lie_down_init_prob", 0.0))
+                    if torch.any(mask):
+                        root_pos[mask, 2] = float(self.config.get("lie_down_init_height", 0.5))
+                        sign = 1 if random.random() < 0.5 else -1
+                        rot_quat = quat_from_angle_axis(
+                            torch.tensor(sign * (-torch.pi / 2), device=self.device),
+                            torch.tensor([1.0, 0.0, 0.0], device=self.device),
+                            w_last=True,
+                        )
+                        root_rot[mask] = quat_mul(rot_quat.expand_as(root_rot[mask]), root_rot[mask], w_last=True)
+                root_pos += (
+                    torch.randn_like(root_pos) * float(self.config.init_noise_scale.root_pos) * float(self.config.noise_to_initial_level)
+                )
+                root_rot = quat_mul(
+                    _small_random_quaternions(
+                        len(env_ids),
+                        float(self.config.init_noise_scale.root_rot) * 3.14 / 180.0 * float(self.config.noise_to_initial_level),
+                        self.device,
+                    ),
+                    root_rot,
+                    w_last=True,
+                )
+                root_vel += (
+                    torch.randn_like(root_vel) * float(self.config.init_noise_scale.root_vel) * float(self.config.noise_to_initial_level)
+                )
+                root_ang_vel += (
+                    torch.randn_like(root_ang_vel)
+                    * float(self.config.init_noise_scale.root_ang_vel)
+                    * float(self.config.noise_to_initial_level)
+                )
+                joint_pos += (
+                    torch.randn_like(joint_pos) * float(self.config.init_noise_scale.dof_pos) * float(self.config.noise_to_initial_level)
+                )
+                joint_vel += (
+                    torch.randn_like(joint_vel) * float(self.config.init_noise_scale.dof_vel) * float(self.config.noise_to_initial_level)
+                )
+
             root_xyzw = torch.cat([root_pos, root_rot, root_vel, root_ang_vel], dim=-1)
-            joint_pos = motion_res["dof_pos"] + torch.randn_like(motion_res["dof_pos"]) * float(
-                self.config.init_noise_scale.dof_pos
-            ) * float(self.config.noise_to_initial_level)
-            joint_vel = motion_res["dof_vel"] + torch.randn_like(motion_res["dof_vel"]) * float(
-                self.config.init_noise_scale.dof_vel
-            ) * float(self.config.noise_to_initial_level)
 
         root_wxyz = torch.cat([root_xyzw[:, :3], xyzw_to_wxyz(root_xyzw[:, 3:7]), root_xyzw[:, 7:13]], dim=-1)
         self.robot.write_root_state_to_sim(root_wxyz, env_ids=env_ids)

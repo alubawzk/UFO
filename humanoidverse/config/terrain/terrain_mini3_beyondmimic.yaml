@@ -1,0 +1,41 @@
+# @package _global_
+
+defaults:
+  - terrain_base
+
+# Geometry and curriculum inherited by Mini3-BeyondMimic-RealMotor from
+# Mini3BeyondMimicEnvCfg.
+terrain:
+  profile: mini3_beyondmimic
+  mesh_type: heightfield
+  curriculum: true
+  static_friction: 1.0
+  dynamic_friction: 1.0
+  restitution: 0.0
+
+  terrain_length: 8.0
+  terrain_width: 8.0
+  border_size: 20.0
+  num_rows: 10
+  num_cols: 20
+  horizontal_scale: 0.05
+  vertical_scale: 0.005
+  max_init_terrain_level: null
+  use_cache: false
+  color_scheme: none
+
+  sub_terrains:
+    wave:
+      proportion: 0.6
+      amplitude_range: [0.0, 0.015]
+      num_waves: 3
+      border_width: 0.25
+    random_rough:
+      proportion: 0.4
+      noise_range: [-0.005, 0.01]
+      noise_step: 0.005
+      border_width: 0.25
+
+  measure_heights: false
+  measured_points_x: [0.0]
+  measured_points_y: [0.0]

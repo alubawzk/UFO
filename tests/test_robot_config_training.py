@@ -13,9 +13,12 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabCore,
     _compose_humanoidverse_config,
     _contact_force_mask,
-    _randomize_dc_motor_strength,
+    _randomize_body_mass_and_inertia,
+    _randomize_mini3_actuator_gains,
+    _randomize_mini3_rigid_body_material,
     _SimulationStepActionDelay,
     _SimulationStepImuDelay,
+    _terrain_levels_tracking,
     make_mjlab_ufo_env_cfg,
 )
 from humanoidverse.tracking_inference import (
@@ -185,28 +188,75 @@ class RobotConfigTrainingTest(unittest.TestCase):
         )
         self.assertTrue(str(cfg.env.robot_config_path).endswith("configs/robots/g1_29dof.yaml"))
 
-    def test_mini3_pd_gain_domain_randomization_builds_reset_event(self) -> None:
+    def test_mini3_beyondmimic_real_motor_domain_randomization_builds_startup_events(self) -> None:
         from mjlab.envs.mdp import dr as mjlab_dr
 
         training = load_robot_training_spec("configs/robots/mini3.yaml")
         hv_config, mjlab_config = _make_mini3_mjlab_cfg()
 
+        self.assertEqual(hv_config.domain_rand.profile, "mini3_beyondmimic_real_motor")
         self.assertTrue(hv_config.domain_rand.randomize_pd_gain)
-        self.assertEqual(list(hv_config.domain_rand.kp_range), [0.75, 1.25])
-        self.assertEqual(list(hv_config.domain_rand.kd_range), [0.75, 1.25])
+        self.assertEqual(list(hv_config.domain_rand.pd_gain.non_ankle.kp_range), [0.8, 1.2])
+        self.assertEqual(list(hv_config.domain_rand.pd_gain.non_ankle.kd_range), [0.8, 1.2])
+        self.assertEqual(list(hv_config.domain_rand.pd_gain.ankle.kp_range), [0.8, 1.2])
+        self.assertEqual(list(hv_config.domain_rand.pd_gain.ankle.kd_range), [0.3, 5.0])
         event = mjlab_config.events["random_pd_gains"]
-        self.assertEqual(event.mode, "reset")
-        self.assertIs(event.func, mjlab_dr.pd_gains)
-        self.assertEqual(event.params["kp_range"], (0.75, 1.25))
-        self.assertEqual(event.params["kd_range"], (0.75, 1.25))
-        self.assertEqual(event.params["operation"], "scale")
+        self.assertEqual(event.mode, "startup")
+        self.assertIs(event.func, _randomize_mini3_actuator_gains)
+        self.assertEqual(event.params["non_ankle_kp_range"], (0.8, 1.2))
+        self.assertEqual(event.params["non_ankle_kd_range"], (0.8, 1.2))
+        self.assertEqual(event.params["ankle_kp_range"], (0.8, 1.2))
+        self.assertEqual(event.params["ankle_kd_range"], (0.3, 5.0))
+
+        material_event = mjlab_config.events["random_rigid_body_material"]
+        self.assertEqual(material_event.mode, "startup")
+        self.assertIs(material_event.func, _randomize_mini3_rigid_body_material)
+        self.assertEqual(material_event.params["static_friction_range"], (0.6, 1.6))
+        self.assertEqual(material_event.params["dynamic_friction_range"], (0.6, 1.2))
+        self.assertEqual(material_event.params["restitution_range"], (0.0, 0.5))
+        self.assertEqual(material_event.params["num_buckets"], 64)
+
+        base_mass_event = mjlab_config.events["random_base_mass"]
+        self.assertEqual(base_mass_event.mode, "startup")
+        self.assertIs(base_mass_event.func, _randomize_body_mass_and_inertia)
+        self.assertEqual(base_mass_event.params["asset_cfg"].body_names, ("waist_yaw_link",))
+        self.assertEqual(base_mass_event.params["ranges"], (-1.5, 1.5))
+        self.assertEqual(base_mass_event.params["operation"], "add")
+
+        base_com_event = mjlab_config.events["random_base_com"]
+        self.assertEqual(base_com_event.params["asset_cfg"].body_names, ("waist_yaw_link",))
+        self.assertEqual(base_com_event.params["ranges"], {0: (-0.03, 0.1), 1: (-0.05, 0.05), 2: (-0.08, 0.08)})
+
+        link_mass_event = mjlab_config.events["random_link_mass"]
+        self.assertIs(link_mass_event.func, _randomize_body_mass_and_inertia)
+        self.assertEqual(link_mass_event.params["asset_cfg"].body_names, ("left_.*_link", "right_.*_link"))
+        self.assertEqual(link_mass_event.params["ranges"], (0.8, 1.2))
+
+        expected_joint_parameter_events = {
+            "random_non_ankle_joint_friction": (mjlab_dr.joint_friction, (0.7, 1.3)),
+            "random_non_ankle_joint_armature": (mjlab_dr.joint_armature, (0.7, 1.3)),
+            "random_ankle_joint_friction": (mjlab_dr.joint_friction, (0.5, 2.0)),
+            "random_ankle_joint_armature": (mjlab_dr.joint_armature, (0.5, 1.5)),
+        }
+        for name, (func, ranges) in expected_joint_parameter_events.items():
+            joint_event = mjlab_config.events[name]
+            self.assertEqual(joint_event.mode, "startup")
+            self.assertIs(joint_event.func, func)
+            self.assertEqual(joint_event.params["ranges"], ranges)
+            self.assertEqual(joint_event.params["operation"], "scale")
 
         self.assertTrue(hv_config.lie_down_init)
         self.assertEqual(float(hv_config.lie_down_init_prob), 0.3)
-        self.assertEqual(float(hv_config.lie_down_init_height), 0.1)
+        self.assertEqual(float(hv_config.lie_down_init_height), 0.35)
         self.assertTrue(hv_config.domain_rand.randomize_ctrl_delay)
+        self.assertEqual(hv_config.domain_rand.default_dof_pos_randomization_mode, "startup")
+        self.assertEqual(list(hv_config.domain_rand.default_dof_pos_noise_range), [-0.07, 0.07])
+        self.assertEqual(list(hv_config.domain_rand.reset_state.joint_position_range), [-0.03, 0.03])
+        self.assertEqual(float(hv_config.domain_rand.reset_state.reset_root_height_offset), 0.02)
+        self.assertEqual(float(hv_config.domain_rand.reset_state.soft_joint_pos_limit_factor), 0.9)
         self.assertEqual(int(hv_config.simulator.config.sim.fps), 500)
         self.assertEqual(int(hv_config.simulator.config.sim.control_decimation), 10)
+        self.assertEqual(float(hv_config.env_spacing), 2.5)
         self.assertEqual(mjlab_config.decimation, 10)
         self.assertAlmostEqual(mjlab_config.sim.mujoco.timestep, 0.002)
         action_cfg = mjlab_config.actions["actions"]
@@ -216,7 +266,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
         )
         self.assertEqual(delay_by_joint["left_hip_pitch_joint"], (4, 4))
         self.assertEqual(delay_by_joint["left_ankle_pitch_joint"], (3, 5))
-        self.assertEqual(delay_by_joint["left_shoulder_pitch_joint"], (0, 0))
+        self.assertEqual(delay_by_joint["left_shoulder_pitch_joint"], (3, 3))
         self.assertEqual(action_cfg.delay_group_names.count("4340P"), 9)
         self.assertEqual(action_cfg.delay_group_names.count("ankles"), 4)
         self.assertEqual(action_cfg.delay_group_names.count("arms"), 8)
@@ -224,17 +274,82 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertTrue(training.imu_delay["enabled"])
         self.assertTrue(training.imu_delay["randomize_on_reset"])
         self.assertTrue(training.imu_delay["interpolate"])
-        self.assertTrue(hv_config.domain_rand.randomize_motor_strength)
+        self.assertFalse(hv_config.domain_rand.randomize_motor_strength)
+        self.assertNotIn("random_motor_strength", mjlab_config.events)
         self.assertFalse(training.action_rescale)
         self.assertFalse(hv_config.robot.control.action_rescale)
         self.assertEqual(training.action_clip_value, 8.0)
         self.assertEqual(training.normalize_action_to, 8.0)
         self.assertEqual(float(hv_config.robot.control.action_clip_value), 8.0)
         self.assertEqual(float(hv_config.robot.control.normalize_action_to), 8.0)
-        motor_event = mjlab_config.events["random_motor_strength"]
-        self.assertEqual(motor_event.mode, "reset")
-        self.assertIs(motor_event.func, _randomize_dc_motor_strength)
-        self.assertEqual(motor_event.params["strength_range"], (0.9, 1.1))
+
+        push_event = mjlab_config.events["push_robots"]
+        self.assertEqual(push_event.interval_range_s, (1.0, 3.0))
+        self.assertEqual(
+            push_event.params["velocity_range"],
+            {
+                "x": (-0.5, 0.5),
+                "y": (-0.5, 0.5),
+                "z": (-0.2, 0.2),
+                "roll": (-0.52, 0.52),
+                "pitch": (-0.52, 0.52),
+                "yaw": (-0.78, 0.78),
+            },
+        )
+
+    def test_mini3_beyondmimic_terrain_and_curriculum_match_source_task(self) -> None:
+        _, mjlab_config = _make_mini3_mjlab_cfg()
+
+        terrain = mjlab_config.scene.terrain
+        self.assertEqual(terrain.terrain_type, "generator")
+        self.assertIsNone(terrain.max_init_terrain_level)
+        generator = terrain.terrain_generator
+        self.assertTrue(generator.curriculum)
+        self.assertEqual(generator.size, (8.0, 8.0))
+        self.assertEqual(generator.border_width, 20.0)
+        self.assertEqual(generator.num_rows, 10)
+        self.assertEqual(generator.num_cols, 20)
+        self.assertEqual(generator.color_scheme, "none")
+        self.assertEqual(len(generator.sub_terrains), 20)
+        waves = [cfg for name, cfg in generator.sub_terrains.items() if name.startswith("wave_")]
+        rough = [cfg for name, cfg in generator.sub_terrains.items() if name.startswith("random_rough_")]
+        self.assertEqual((len(waves), len(rough)), (12, 8))
+        self.assertTrue(all(cfg.amplitude_range == (0.0, 0.015) and cfg.num_waves == 3 for cfg in waves))
+        self.assertTrue(all(cfg.noise_range == (-0.005, 0.01) and cfg.noise_step == 0.005 for cfg in rough))
+        self.assertTrue(all(cfg.horizontal_scale == 0.05 and cfg.vertical_scale == 0.005 for cfg in (*waves, *rough)))
+        self.assertTrue(all(cfg.border_width == 0.25 for cfg in (*waves, *rough)))
+        self.assertIs(mjlab_config.curriculum["terrain_levels"].func, _terrain_levels_tracking)
+
+    def test_terrain_tracking_curriculum_promotes_timeouts_and_demotes_early_terminations(self) -> None:
+        class Terrain:
+            def __init__(self) -> None:
+                self.terrain_levels = torch.tensor([2, 2, 2], dtype=torch.long)
+                self.last_update = None
+
+            def update_env_origins(self, env_ids, move_up, move_down) -> None:
+                self.last_update = (env_ids.clone(), move_up.clone(), move_down.clone())
+                self.terrain_levels[env_ids] += move_up.long() - move_down.long()
+
+        terrain = Terrain()
+        env = type(
+            "FakeEnv",
+            (),
+            {
+                "num_envs": 3,
+                "device": "cpu",
+                "scene": type("FakeScene", (), {"terrain": terrain})(),
+                "reset_time_outs": torch.tensor([True, False, False]),
+                "reset_terminated": torch.tensor([True, True, False]),
+            },
+        )()
+
+        mean_level = _terrain_levels_tracking(env, slice(None))
+
+        env_ids, move_up, move_down = terrain.last_update
+        torch.testing.assert_close(env_ids, torch.tensor([0, 1, 2]))
+        torch.testing.assert_close(move_up, torch.tensor([True, False, False]))
+        torch.testing.assert_close(move_down, torch.tensor([False, True, False]))
+        self.assertEqual(float(mean_level), 2.0)
 
     def test_disable_dr_removes_mini3_pd_gain_event(self) -> None:
         hv_config, mjlab_config = _make_mini3_mjlab_cfg(disable_domain_randomization=True)
@@ -245,6 +360,13 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertTrue(all(step_range == (0, 0) for step_range in mjlab_config.actions["actions"].delay_step_ranges))
         self.assertFalse(hv_config.domain_rand.randomize_motor_strength)
         self.assertNotIn("random_motor_strength", mjlab_config.events)
+        self.assertFalse(hv_config.domain_rand.randomize_rigid_body_material)
+        self.assertNotIn("random_rigid_body_material", mjlab_config.events)
+        self.assertFalse(hv_config.domain_rand.randomize_base_mass)
+        self.assertNotIn("random_base_mass", mjlab_config.events)
+        self.assertFalse(hv_config.domain_rand.randomize_joint_parameters)
+        self.assertNotIn("random_non_ankle_joint_friction", mjlab_config.events)
+        self.assertFalse(hv_config.domain_rand.randomize_initial_state)
 
     def test_mini3_actuator_dynamics_reach_mjlab_cfg(self) -> None:
         training = load_robot_training_spec("configs/robots/mini3.yaml")
