@@ -120,7 +120,12 @@ def broadcast_object(value: Any, src: int = 0) -> Any:
     if not is_distributed():
         return value
     objects = [value if dist.get_rank() == src else None]
-    dist.broadcast_object_list(objects, src=src)
+    if dist.get_backend() == "gloo":
+        dist.broadcast_object_list(objects, src=src)
+    else:
+        if _CONTROL_GROUP is None:
+            raise RuntimeError("initialize_control_group() must be called on every rank before broadcast_object()")
+        dist.broadcast_object_list(objects, src=src, group=_CONTROL_GROUP)
     return objects[0]
 
 

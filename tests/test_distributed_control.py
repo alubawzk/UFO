@@ -54,6 +54,30 @@ class DistributedControlBarrierTest(unittest.TestCase):
 
         barrier.assert_called_once_with(group=group)
 
+    @patch.object(distributed.dist, "broadcast_object_list")
+    @patch.object(distributed.dist, "get_rank", return_value=0)
+    @patch.object(distributed.dist, "get_backend", return_value="nccl")
+    @patch.object(distributed.dist, "get_world_size", return_value=8)
+    @patch.object(distributed.dist, "is_initialized", return_value=True)
+    @patch.object(distributed.dist, "is_available", return_value=True)
+    def test_object_broadcast_uses_gloo_group(
+        self,
+        _is_available: Mock,
+        _is_initialized: Mock,
+        _get_world_size: Mock,
+        _get_backend: Mock,
+        _get_rank: Mock,
+        broadcast_object_list: Mock,
+    ) -> None:
+        group = object()
+        distributed._CONTROL_GROUP = group
+        payload = {"priorities": [1.0, 2.0]}
+
+        result = distributed.broadcast_object(payload, src=0)
+
+        self.assertIs(result, payload)
+        broadcast_object_list.assert_called_once_with([payload], src=0, group=group)
+
 
 if __name__ == "__main__":
     unittest.main()

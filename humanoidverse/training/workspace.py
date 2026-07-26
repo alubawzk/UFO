@@ -819,8 +819,12 @@ class Workspace:
                             "idxs": idxs,
                             "file_name": name_in_buffer,
                         }
+                        if self.cfg.distributed_sync:
+                            print(f"[INFO] Rank 0 priority payload prepared at time {global_time}; broadcasting over CPU control group")
                     if self.cfg.distributed_sync:
                         priority_payload = broadcast_object(priority_payload, src=0)
+                        if self.distributed_rank == 0:
+                            print(f"[INFO] Distributed CPU priority broadcast completed at time {global_time}")
                     if priority_payload is None:
                         raise RuntimeError("Prioritization requires evaluation metrics, but no priority payload was produced.")
                     priorities = priority_payload["priorities"].to(self.agent.device)
@@ -834,6 +838,8 @@ class Workspace:
                     replay_buffer["expert_slicer"].update_priorities(
                         priorities=priorities.to(self.cfg.buffer_device), idxs=torch.tensor(np.array(idxs), device=self.cfg.buffer_device)
                     )
+                    if self.distributed_rank == 0:
+                        print(f"[INFO] Motion prioritization update completed at time {global_time}")
 
             if global_time + global_step_increment > self.cfg.num_env_steps:
                 if self._write_shared_artifacts:
