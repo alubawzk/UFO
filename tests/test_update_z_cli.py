@@ -105,6 +105,22 @@ class UpdateZCliTest(unittest.TestCase):
         )
         self.assertFalse(cfg.checkpoint_buffer)
 
+    def test_disable_terrain_cli_selects_flat_plane(self) -> None:
+        args = self._parse("--disable-terrain")
+        self.assertTrue(args.disable_terrain)
+        cfg = build_ufo_mjlab_config(
+            device="cpu",
+            work_dir="/tmp/ufo_disable_terrain_test",
+            num_envs=1,
+            num_env_steps=1,
+            seed=1,
+            use_wandb=False,
+            wandb_run_name=None,
+            smoke=True,
+            disable_terrain=args.disable_terrain,
+        )
+        self.assertIn("terrain=terrain_locomotion_plane", cfg.env.hydra_overrides)
+
     def test_disabled_checkpoint_buffer_still_saves_training_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Workspace.__new__(Workspace)

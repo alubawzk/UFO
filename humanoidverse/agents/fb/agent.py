@@ -18,7 +18,7 @@ from ..base import BaseConfig
 from ..envs.utils.gym_spaces import json_to_space, space_to_json
 from ..misc.zbuffer import ZBuffer
 from ..nn_models import _soft_update_params, eval_mode, weight_init
-from ...distributed import average_gradients
+from ...distributed import average_gradients, clip_grad_norm_stable_
 from .model import FBModel, FBModelConfig
 
 
@@ -275,8 +275,8 @@ class FBAgent:
         fb_loss.backward()
         average_gradients((*self._model._forward_map.parameters(), *self._model._backward_map.parameters()))
         if clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self._model._forward_map.parameters(), clip_grad_norm, error_if_nonfinite=True)
-            torch.nn.utils.clip_grad_norm_(self._model._backward_map.parameters(), clip_grad_norm, error_if_nonfinite=True)
+            clip_grad_norm_stable_(self._model._forward_map.parameters(), clip_grad_norm)
+            clip_grad_norm_stable_(self._model._backward_map.parameters(), clip_grad_norm)
         self.forward_optimizer.step()
         self.backward_optimizer.step()
 
@@ -323,7 +323,7 @@ class FBAgent:
         actor_loss.backward()
         average_gradients(self._model._actor.parameters())
         if clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm, error_if_nonfinite=True)
+            clip_grad_norm_stable_(self._model._actor.parameters(), clip_grad_norm)
         self.actor_optimizer.step()
 
         return {"actor_loss": actor_loss.detach(), "q": Q.mean().detach()}

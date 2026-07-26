@@ -15,8 +15,13 @@ from ..base import BaseConfig
 from ..fb.agent import FBAgent, FBAgentTrainConfig
 from ..nn_models import _soft_update_params, eval_mode
 from ..pytree_utils import tree_get_batch_size
-from ...distributed import average_gradients
+from ...distributed import average_gradients, clip_grad_norm_stable_
 from .model import FBcprModel, FBcprModelConfig
+
+
+def _stable_gradient_norm(gradients: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Compute per-sample L2 norms with a finite derivative at zero."""
+    return torch.sqrt(torch.sum(gradients.square(), dim=1) + eps)
 
 
 class FBcprAgentTrainConfig(FBAgentTrainConfig):
@@ -318,7 +323,7 @@ class FBcprAgent(FBAgent):
         # Filter out None's from gradients: if any input is not used by the discriminator, autograd.grad will return None for its gradient
         gradients = [g for g in gradients if g is not None]
         cat_gradients = torch.cat(gradients, dim=1)
-        gradient_penalty = ((cat_gradients.norm(2, dim=1) - 1) ** 2).mean()
+        gradient_penalty = ((_stable_gradient_norm(cat_gradients) - 1) ** 2).mean()
 
         # Example of code with grad_penalty_obs_weight
         # obs_dim = real_obs.shape[-1]
@@ -355,11 +360,7 @@ class FBcprAgent(FBAgent):
         loss.backward()
         average_gradients(self._model._discriminator.parameters())
         if self.cfg.train.clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self._model._discriminator.parameters(),
-                self.cfg.train.clip_grad_norm,
-                error_if_nonfinite=True,
-            )
+            clip_grad_norm_stable_(self._model._discriminator.parameters(), self.cfg.train.clip_grad_norm)
         self.discriminator_optimizer.step()
 
         with torch.no_grad():
@@ -401,11 +402,7 @@ class FBcprAgent(FBAgent):
         critic_loss.backward()
         average_gradients(self._model._critic.parameters())
         if self.cfg.train.clip_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self._model._critic.parameters(),
-                self.cfg.train.clip_grad_norm,
-                error_if_nonfinite=True,
-            )
+            clip_grad_norm_stable_(self._model._critic.parameters(), self.cfg.train.clip_grad_norm)
         self.critic_optimizer.step()
 
         with torch.no_grad():
@@ -447,7 +444,7 @@ class FBcprAgent(FBAgent):
         actor_loss.backward()
         average_gradients(self._model._actor.parameters())
         if clip_grad_norm is not None:
-            torch.nn.utils.clip_grad_norm_(self._model._actor.parameters(), clip_grad_norm, error_if_nonfinite=True)
+            clip_grad_norm_stable_(self._model._actor.parameters(), clip_grad_norm)
         self.actor_optimizer.step()
 
         with torch.no_grad():

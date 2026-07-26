@@ -110,6 +110,7 @@ def build_ufo_mjlab_config(
     buffer_size: int = DEFAULT_BUFFER_SIZE,
     checkpoint_buffer: bool | None = None,
     disable_dr: bool = False,
+    disable_terrain: bool = False,
     disable_obs_noise: bool = False,
     lr_scale: float = 1.0,
     clip_grad_norm: float = 0.0,
@@ -174,6 +175,9 @@ def build_ufo_mjlab_config(
         f"robot.control.normalize_action_to={robot_training.normalize_action_to}",
         *robot_training.hydra_overrides,
     ]
+    if disable_terrain:
+        hydra_overrides = [override for override in hydra_overrides if not override.startswith("terrain=")]
+        hydra_overrides.append("terrain=terrain_locomotion_plane")
     if cartwheel_aux_safe:
         hydra_overrides.extend(
             [
@@ -321,6 +325,7 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         buffer_size=args.buffer_size,
         checkpoint_buffer=not args.no_checkpoint_buffer,
         disable_dr=bool(args.disable_dr),
+        disable_terrain=bool(args.disable_terrain),
         disable_obs_noise=bool(args.disable_obs_noise),
         lr_scale=args.lr_scale,
         clip_grad_norm=args.clip_grad_norm,
@@ -339,7 +344,8 @@ def run_train(args: argparse.Namespace, log_dir: Path) -> None:
         f"num_agent_updates={cfg.num_agent_updates}, update_agent_every_local={cfg.update_agent_every}, "
         f"init_checkpoint={cfg.init_checkpoint}, "
         f"cartwheel_aux_safe={args.cartwheel_aux_safe}, lr_scale={args.lr_scale}, clip_grad_norm={args.clip_grad_norm}, "
-        f"disable_dr={cfg.env.disable_domain_randomization}, disable_obs_noise={cfg.env.disable_obs_noise}, "
+        f"disable_dr={cfg.env.disable_domain_randomization}, disable_terrain={args.disable_terrain}, "
+        f"disable_obs_noise={cfg.env.disable_obs_noise}, "
         f"compile={cfg.agent.compile}, "
         f"reg_coeff={getattr(cfg.agent.train, 'reg_coeff', None)}, "
         f"reg_coeff_aux={getattr(cfg.agent.train, 'reg_coeff_aux', None)}, "
@@ -496,6 +502,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--disable-dr", action="store_true", help="Disable domain randomization for training.")
+    parser.add_argument(
+        "--disable-terrain",
+        action="store_true",
+        help="Replace rough/curriculum terrain with a flat plane while preserving other environment settings.",
+    )
     parser.add_argument("--disable-obs-noise", action="store_true", help="Disable observation noise for training.")
     parser.add_argument("--lr-scale", type=float, default=1.0, help="Scale FB learning rates. TeCH preset ignores this value.")
     parser.add_argument(

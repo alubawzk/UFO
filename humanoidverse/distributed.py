@@ -65,6 +65,45 @@ def average_gradients(parameters: Iterable[torch.nn.Parameter]) -> None:
 
 
 @torch.compiler.disable
+@torch.no_grad()
+def clip_grad_norm_stable_(parameters: Iterable[torch.nn.Parameter], max_norm: float) -> torch.Tensor:
+    """Clip a global L2 gradient norm without overflowing float32 square sums."""
+    if max_norm <= 0:
+        raise ValueError(f"max_norm must be positive, got {max_norm}")
+
+    grads = [param.grad for param in parameters if param.grad is not None]
+    if not grads:
+        return torch.zeros((), dtype=torch.float64)
+    if any(grad.is_sparse for grad in grads):
+        raise ValueError("clip_grad_norm_stable_ does not support sparse gradients")
+
+    device = grads[0].device
+    if any(grad.device != device for grad in grads):
+        raise ValueError("clip_grad_norm_stable_ requires all gradients to be on the same device")
+
+    max_abs = torch.zeros((), dtype=torch.float32, device=device)
+    for index, grad in enumerate(grads):
+        grad_max = grad.detach().abs().max().float()
+        if not bool(torch.isfinite(grad_max).item()):
+            raise RuntimeError(f"Gradient tensor {index} contains NaN or Inf values before clipping")
+        max_abs = torch.maximum(max_abs, grad_max)
+
+    if float(max_abs.item()) == 0.0:
+        return torch.zeros((), dtype=torch.float64, device=device)
+
+    scaled_square_sum = torch.zeros((), dtype=torch.float32, device=device)
+    for grad in grads:
+        scaled = grad.detach().abs().float() / max_abs
+        scaled_square_sum += scaled.square().sum()
+
+    total_norm = max_abs.double() * scaled_square_sum.double().sqrt()
+    clip_coefficient = torch.clamp(torch.as_tensor(max_norm, dtype=torch.float64, device=device) / (total_norm + 1e-12), max=1.0)
+    for grad in grads:
+        grad.mul_(clip_coefficient.to(dtype=grad.dtype))
+    return total_norm
+
+
+@torch.compiler.disable
 def broadcast_module_state(module: torch.nn.Module, src: int = 0) -> None:
     if not is_distributed():
         return
