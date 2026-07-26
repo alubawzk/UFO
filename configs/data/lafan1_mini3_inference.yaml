@@ -1,0 +1,13 @@
+robot_config: configs/robots/mini3.yaml
+datasets:
+- name: lafan1_mini3
+  format: robot_state_pkl
+  source_path: humanoidverse/data/lafan1_mini3
+  weight: 1.0
+  auto_build:
+    train_clip_seconds: 10.0
+    clip_stride_seconds: 10.0
+    keep_short: true
+    min_clip_seconds: 1.0
+  columns:
+    root_quat_order: xyzw

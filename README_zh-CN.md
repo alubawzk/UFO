@@ -319,7 +319,45 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.tracking_inference \
   --export-onnx false \
   --fps 50
 
+# 把原始 flat PKL 转成包含完整序列的 inference MotionLib PKL。
+# 生成的 manifest 会为训练保留近 10 秒 clips，但 inference 自动选择未裁剪的 full_ufo.pkl。
+.venv/bin/python -m humanoidverse.tools.data_build \
+  --robot configs/robots/mini3.yaml \
+  --source humanoidverse/data/lafan1_mini3/walk1_subject2.pkl \
+  --format robot_state_pkl \
+  --name walk1_subject2_mini3 \
+  --clip-seconds 10 \
+  --stride-seconds 10 \
+  --out configs/data/walk1_subject2_mini3.yaml \
+  --rebuild-cache \
+  --force
+
+# 批量转换 lafan1_mini3 目录中的全部 flat PKL。
+# 默认生成 77 条未裁剪 inference motions 和 1692 条近 10 秒 training clips。
+scripts/convert_lafan1_mini3_inference.sh
+
+# 生成 7 组时间伸缩数据；输出仍保持原始约 30 FPS，倍率直接作用于帧数和动作时长。
+.venv/bin/python -m humanoidverse.tools.resample_ufo_motion_scales \
+  --input cache/motion_data/lafan1_mini3_inference/lafan1_mini3_full_ufo.pkl \
+  --output-dir cache/motion_data/lafan1_mini3_inference/resampled_scales \
+  --scales 1.25 1.5 1.75 2 0.75 0.5 0.25 \
+  --verify-output \
+  --overwrite
+
 ## mujoco test
+# 对完整 walk1_subject2 序列执行一次 inference；--loop false 会在末帧退出。
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new \
+  --data-path cache/motion_data/lafan1_mini3_inference/lafan1_mini3_full_ufo.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --headless false \
+  --motion-id 0 \
+  --loop false \
+  --show-reference-motion true \
+  --latent-future-frames 3 \
+  --latent-future-gamma 0.8
+
 CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
   --model-folder runs/Revise_torque_limit \
   --data-path humanoidverse/data/lafan1_mini3_ufo/walk1_subject2__clip002.pkl \
@@ -365,6 +403,21 @@ CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference 
   --show-reference-motion true \
   --latent-future-frames 3 \
   --latent-future-gamma 0.8
+
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new \
+  --data-path cache/motion_data/lafan1_mini3_inference/walk1_subject2_mini3_full_ufo.pkl \
+  --robot-config configs/robots/mini3.yaml \
+  --device cuda:0 \
+  --motion-id 0 \
+  --headless false \
+  --loop true \
+  --show-reference-motion true \
+  --latent-future-frames 3 \
+  --latent-future-gamma 0.8
+
+CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.mujoco_tracking_inference   --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision_new   --data-path pico_data/sample_clip_2_mini3_ufo.pkl   --robot-config configs/robots/mini3.yaml   --scene-xml humanoidverse/data/robots/mini3_mjlab/scene.xml   --device cuda:0   --motion-id 0   --headless false   --loop true   --show-reference-motion true   --reference-lateral-offset 0   --reference-root-xy-scale 1   --latent-future-frames 3   --latent-future-gamma 0.8
+
 ```
 
 该命令会同时显示两台 Mini3：原材质机器人是 policy 实际控制的 MuJoCo 机器人，青色半透明机器人是 `motion-id 2` 对应的 MotionLib reference motion，并沿 Y 方向错开 `1.0 m` 方便对比。

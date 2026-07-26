@@ -10,7 +10,7 @@
       </default>
       <default class="collision">
         <!-- contype=0 disables robot-robot contacts; conaffinity=1 still accepts environment geoms with contype=1. -->
-        <geom material="collision_material" condim="3" contype="0" conaffinity="1" priority="1" group="1" solref="0.005 1" solimp="0.99 0.999 1e-05" friction="2 0.01 0.01" />
+        <geom material="collision_material" condim="3" contype="0" conaffinity="1" priority="1" group="1" solref="0.005 1" solimp="0.99 0.999 1e-05" friction="1 0.01 0.01" />
       </default>
     </default>
   </default>

@@ -35,6 +35,7 @@ from humanoidverse.utils.helpers import get_backward_observation
 from humanoidverse.utils.mini3_real_motor import Mini3RealMotorModel
 from humanoidverse.utils.motion_lib.motion_lib_robot import MotionLibRobot
 from humanoidverse.utils.robot_spec import load_robot_training_spec, resolve_robot_config_path
+from humanoidverse.utils.torch_utils import quat_to_exp_map
 
 DEFAULT_ROBOT_CONFIG = "configs/robots/mini3.yaml"
 
@@ -180,27 +181,64 @@ def _build_mujoco_model(
     *,
     physics_hz: float,
     ground_friction: float,
+    scene_xml_path: Path | None = None,
+    initial_marker_xy: np.ndarray | None = None,
 ) -> tuple[mujoco.MjModel, JointLayout]:
-    spec = mujoco.MjSpec.from_file(str(xml_path))
-    spec.worldbody.add_geom(
-        name="sim2sim_ground",
-        type=mujoco.mjtGeom.mjGEOM_PLANE,
-        size=[0.0, 0.0, 0.01],
-        rgba=[0.35, 0.37, 0.40, 1.0],
-        contype=1,
-        conaffinity=1,
-        friction=[float(ground_friction), 0.005, 0.0001],
-    )
-    spec.worldbody.add_light(
-        name="sim2sim_key_light",
-        pos=[0.0, -3.0, 4.0],
-        dir=[0.2, 0.5, -1.0],
-        diffuse=[0.8, 0.8, 0.8],
-        ambient=[0.35, 0.35, 0.35],
-        specular=[0.1, 0.1, 0.1],
-    )
+    if scene_xml_path is None:
+        model_source = xml_path
+        spec = mujoco.MjSpec.from_file(str(model_source))
+        spec.worldbody.add_geom(
+            name="sim2sim_ground",
+            type=mujoco.mjtGeom.mjGEOM_PLANE,
+            size=[0.0, 0.0, 0.01],
+            rgba=[0.35, 0.37, 0.40, 1.0],
+            contype=1,
+            conaffinity=1,
+            friction=[float(ground_friction), 0.005, 0.0001],
+        )
+        spec.worldbody.add_light(
+            name="sim2sim_key_light",
+            pos=[0.0, -3.0, 4.0],
+            dir=[0.2, 0.5, -1.0],
+            diffuse=[0.8, 0.8, 0.8],
+            ambient=[0.35, 0.35, 0.35],
+            specular=[0.1, 0.1, 0.1],
+        )
+    else:
+        model_source = scene_xml_path.expanduser().resolve()
+        if not model_source.is_file():
+            raise FileNotFoundError(f"MuJoCo scene XML does not exist: {model_source}")
+        spec = mujoco.MjSpec.from_file(str(model_source))
+
     model = spec.compile()
     model.opt.timestep = 1.0 / float(physics_hz)
+
+    floor_id = next(
+        (
+            geom_id
+            for geom_name in ("floor", "sim2sim_ground")
+            if (geom_id := mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)) >= 0
+        ),
+        -1,
+    )
+    if floor_id >= 0:
+        model.geom_friction[floor_id] = [float(ground_friction), 0.005, 0.0001]
+
+    marker_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "initial_position_marker")
+    if initial_marker_xy is not None:
+        marker_xy = np.asarray(initial_marker_xy, dtype=np.float64)
+        if marker_xy.shape != (2,) or not np.all(np.isfinite(marker_xy)):
+            raise ValueError(f"Initial marker XY must contain two finite values, got {marker_xy}")
+        if marker_id < 0:
+            raise ValueError(f"MuJoCo scene={model_source} is missing geom 'initial_position_marker'")
+        model.geom_pos[marker_id, 0:2] = marker_xy
+
+    marker_description = (
+        "none"
+        if marker_id < 0
+        else f"({model.geom_pos[marker_id, 0]:.4f},{model.geom_pos[marker_id, 1]:.4f},0)"
+    )
+    print(f"[mujoco-scene] xml={model_source} initial_marker={marker_description}", flush=True)
 
     joint_names = [str(name) for name in robot_training["robot"]["control_joint_names"]]
     layout = _joint_layout(model, joint_names)
@@ -682,6 +720,142 @@ class TrackingReferenceViewer(DebugViewer):
         super().sync(step=step, torque=torque)
 
 
+@torch.no_grad()
+def _scale_motion_lib_root_xy_motion(motion_lib: MotionLibRobot, scale: float) -> None:
+    """Scale reference root XY motion while preserving root-relative motion."""
+
+    for position_name in ("gts", "gts_t"):
+        positions = getattr(motion_lib, position_name, None)
+        if positions is None:
+            continue
+        root_xy = positions[:, 0:1, 0:2].clone()
+        positions[:, :, 0:2] += (float(scale) - 1.0) * root_xy
+
+    for velocity_name in ("gvs", "gvs_t"):
+        velocities = getattr(motion_lib, velocity_name, None)
+        if velocities is None:
+            continue
+        root_xy_velocity = velocities[:, 0:1, 0:2].clone()
+        velocities[:, :, 0:2] += (float(scale) - 1.0) * root_xy_velocity
+
+    root_velocities = getattr(motion_lib, "grvs", None)
+    if root_velocities is not None:
+        root_velocities[:, 0:2] *= float(scale)
+
+
+def _zero_motion_lib_root_xy_motion(motion_lib: MotionLibRobot) -> None:
+    """Freeze reference root XY immediately after MotionLib finishes loading."""
+
+    _scale_motion_lib_root_xy_motion(motion_lib, 0.0)
+
+
+@torch.no_grad()
+def _offset_motion_lib_joint_angles(
+    motion_lib: MotionLibRobot,
+    *,
+    motion_id: int,
+    dof_names: list[str],
+    offsets_rad: dict[str, float],
+) -> None:
+    """Apply constant joint offsets and rebuild the selected motion's full-body FK."""
+
+    active_offsets = {name: float(value) for name, value in offsets_rad.items() if float(value) != 0.0}
+    if not active_offsets:
+        return
+
+    missing = sorted(set(active_offsets).difference(dof_names))
+    if missing:
+        raise KeyError(f"Reference joint offset names are not present in the checkpoint DOF order: {missing}")
+
+    mesh_parser = motion_lib.mesh_parsers
+    if mesh_parser is None:
+        raise RuntimeError("Reference joint offsets require MotionLib's humanoid FK parser")
+    body_to_joint = mesh_parser.mjcf_data["body_to_joint"]
+    joint_to_body = {joint_name: body_name for body_name, joint_name in body_to_joint.items() if joint_name is not None}
+    missing_bodies = sorted(set(active_offsets).difference(joint_to_body))
+    if missing_bodies:
+        raise KeyError(f"Reference joint offsets cannot resolve MJCF bodies for joints: {missing_bodies}")
+
+    frame_start = int(motion_lib.length_starts[motion_id].item())
+    frame_count = int(motion_lib._motion_num_frames[motion_id].item())
+    frame_slice = slice(frame_start, frame_start + frame_count)
+    body_count = len(mesh_parser.body_names)
+    if not hasattr(motion_lib, "dof_pos"):
+        raise RuntimeError("Reference joint offsets require MotionLib robot DOF positions")
+    adjusted_dof_pos = motion_lib.dof_pos[frame_slice].detach().cpu().clone()
+    if adjusted_dof_pos.shape != (frame_count, len(dof_names)):
+        raise ValueError(
+            f"MotionLib DOF positions have shape={tuple(adjusted_dof_pos.shape)}, "
+            f"expected={(frame_count, len(dof_names))}"
+        )
+
+    pose_aa = torch.zeros((frame_count, body_count, 3), dtype=adjusted_dof_pos.dtype)
+    root_quat_xyzw = motion_lib.grs[frame_slice, 0, :].detach().cpu()
+    pose_aa[:, 0, :] = quat_to_exp_map(root_quat_xyzw, w_last=True)
+    for dof_index, joint_name in enumerate(dof_names):
+        body_name = joint_to_body.get(joint_name)
+        if body_name is None:
+            raise KeyError(f"Cannot resolve MJCF body for checkpoint joint {joint_name!r}")
+        body_index = mesh_parser.body_names.index(body_name)
+        joint_axis = mesh_parser.dof_axis[dof_index].detach().cpu().to(dtype=pose_aa.dtype)
+        pose_aa[:, body_index, :] = adjusted_dof_pos[:, dof_index : dof_index + 1] * joint_axis
+
+    for joint_name, offset_rad in active_offsets.items():
+        dof_index = dof_names.index(joint_name)
+        body_index = mesh_parser.body_names.index(joint_to_body[joint_name])
+        joint_axis = mesh_parser.dof_axis[dof_index].detach().cpu().to(dtype=pose_aa.dtype)
+        adjusted_dof_pos[:, dof_index] += offset_rad
+        pose_aa[:, body_index, :] += joint_axis * offset_rad
+
+    root_position = motion_lib.gts[frame_slice, 0, :].detach().cpu()
+    motion_dt = float(motion_lib._motion_dt[motion_id].item())
+    rebuilt = mesh_parser.fk_batch(
+        pose_aa.unsqueeze(0),
+        root_position.unsqueeze(0),
+        return_full=True,
+        dt=motion_dt,
+    )
+
+    tensor_mapping = {
+        "gts": "global_translation",
+        "grs": "global_rotation",
+        "lrs": "local_rotation",
+        "grvs": "global_root_velocity",
+        "gravs": "global_root_angular_velocity",
+        "gavs": "global_angular_velocity",
+        "gvs": "global_velocity",
+        "gts_t": "global_translation_extend",
+        "grs_t": "global_rotation_extend",
+        "gvs_t": "global_velocity_extend",
+        "gavs_t": "global_angular_velocity_extend",
+    }
+    for destination_name, source_name in tensor_mapping.items():
+        destination = getattr(motion_lib, destination_name, None)
+        source = rebuilt.get(source_name)
+        if destination is None or source is None:
+            continue
+        rebuilt_slice = source[0].to(device=destination.device, dtype=destination.dtype)
+        if rebuilt_slice.shape != destination[frame_slice].shape:
+            raise ValueError(
+                f"Rebuilt reference field {source_name} has shape={tuple(rebuilt_slice.shape)}, "
+                f"expected={tuple(destination[frame_slice].shape)}"
+            )
+        destination[frame_slice].copy_(rebuilt_slice)
+
+    motion_lib.dof_pos[frame_slice].copy_(
+        adjusted_dof_pos.to(
+            device=motion_lib.dof_pos.device,
+            dtype=motion_lib.dof_pos.dtype,
+        )
+    )
+    motion_lib._motion_aa[frame_slice].copy_(
+        pose_aa.reshape(frame_count, -1).to(
+            device=motion_lib._motion_aa.device,
+            dtype=motion_lib._motion_aa.dtype,
+        )
+    )
+
+
 def _motion_reference(
     hv_config: Any,
     *,
@@ -689,12 +863,39 @@ def _motion_reference(
     motion_id: int,
     policy_dt: float,
     root_height_obs: bool,
+    zero_root_linear_velocity: bool,
+    zero_root_xy_motion: bool,
+    root_xy_scale: float,
+    smoothing_window: int,
+    ankle_pitch_offset_deg: float,
 ) -> tuple[MotionLibRobot, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     hv_config.robot.motion.step_dt = float(policy_dt)
     motion_lib = MotionLibRobot(hv_config.robot.motion, num_envs=1, device=device)
     motion_lib.load_all_motions()
+    resolved_root_xy_scale = 0.0 if zero_root_xy_motion else float(root_xy_scale)
+    if resolved_root_xy_scale != 1.0:
+        _scale_motion_lib_root_xy_motion(motion_lib, resolved_root_xy_scale)
+        print(
+            f"[reference-motion] post_load root_xy_scale={resolved_root_xy_scale:g} "
+            "root_z_scale=1 root_vz_scale=1",
+            flush=True,
+        )
     if motion_id < 0 or motion_id >= motion_lib.num_motions():
         raise IndexError(f"motion_id={motion_id} is outside [0, {motion_lib.num_motions() - 1}]")
+    if ankle_pitch_offset_deg != 0.0:
+        ankle_pitch_offset_rad = math.radians(float(ankle_pitch_offset_deg))
+        ankle_pitch_joints = ("left_ankle_pitch_joint", "right_ankle_pitch_joint")
+        _offset_motion_lib_joint_angles(
+            motion_lib,
+            motion_id=motion_id,
+            dof_names=[str(name) for name in hv_config.robot.dof_names],
+            offsets_rad={name: ankle_pitch_offset_rad for name in ankle_pitch_joints},
+        )
+        print(
+            f"[reference-motion] ankle_pitch_offset={ankle_pitch_offset_deg:+g}deg "
+            f"joints={list(ankle_pitch_joints)} full_body_fk=rebuilt",
+            flush=True,
+        )
     default_pos = torch.tensor(
         [float(hv_config.robot.init_state.default_joint_angles[name]) for name in hv_config.robot.dof_names],
         device=device,
@@ -711,7 +912,13 @@ def _motion_reference(
     )
     if helper_env.use_contact_in_obs_max:
         raise NotImplementedError("Pure MuJoCo inference does not yet support use_contact_in_obs_max=True")
-    backward_obs, ref = get_backward_observation(helper_env, motion_id, use_root_height_obs=root_height_obs)
+    backward_obs, ref = get_backward_observation(
+        helper_env,
+        motion_id,
+        use_root_height_obs=root_height_obs,
+        zero_root_linear_velocity=zero_root_linear_velocity,
+        smoothing_window=smoothing_window,
+    )
     return motion_lib, backward_obs, ref
 
 
@@ -847,6 +1054,11 @@ def run(args: argparse.Namespace) -> None:
         motion_id=args.motion_id,
         policy_dt=policy_dt,
         root_height_obs=bool(run_config["env"].get("root_height_obs", False)),
+        zero_root_linear_velocity=args.zero_reference_root_linear_velocity,
+        zero_root_xy_motion=args.zero_reference_root_xy_motion,
+        root_xy_scale=args.reference_root_xy_scale,
+        smoothing_window=args.reference_smoothing_window,
+        ankle_pitch_offset_deg=args.reference_ankle_pitch_offset_deg,
     )
     del motion_lib
     reference_trajectory = _reference_trajectory(ref) if args.show_reference_motion else None
@@ -860,7 +1072,11 @@ def run(args: argparse.Namespace) -> None:
     print(
         f"[tracking-latent] mode=future frames={args.latent_future_frames} "
         f"gamma={args.latent_future_gamma:g} offsets=[0..{args.latent_future_frames - 1}] "
-        f"tail=truncate-before-loop",
+        f"tail=truncate-before-loop "
+        f"reference_root_linear_velocity={'zero' if args.zero_reference_root_linear_velocity else 'motion'} "
+        f"reference_root_xy_scale={0.0 if args.zero_reference_root_xy_motion else args.reference_root_xy_scale:g} "
+        f"reference_smoothing=centered_boxcar/{args.reference_smoothing_window} "
+        f"reference_ankle_pitch_offset={args.reference_ankle_pitch_offset_deg:+g}deg",
         flush=True,
     )
     if args.start_step:
@@ -873,11 +1089,18 @@ def run(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(z.detach().cpu().numpy(), output_dir / f"zs_{args.motion_id}.pkl")
 
+    scene_xml_path = args.scene_xml.expanduser().resolve() if args.scene_xml is not None else xml_path.with_name("scene.xml")
+    if args.scene_xml is None and not scene_xml_path.is_file():
+        scene_xml_path = None
+    marker_index = min(args.start_step, int(ref["ref_body_pos"].shape[0]) - 1)
+    initial_marker_xy = ref["ref_body_pos"][marker_index, 0, 0:2].detach().cpu().numpy()
     model, layout = _build_mujoco_model(
         xml_path,
         robot_training,
         physics_hz=physics_hz,
         ground_friction=args.ground_friction,
+        scene_xml_path=scene_xml_path,
+        initial_marker_xy=initial_marker_xy,
     )
     data = mujoco.MjData(model)
     rng = np.random.default_rng(args.seed)
@@ -1020,6 +1243,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-folder", type=Path, required=True)
     parser.add_argument("--data-path", type=Path, required=True)
     parser.add_argument("--robot-config", type=Path, default=Path(DEFAULT_ROBOT_CONFIG))
+    parser.add_argument(
+        "--scene-xml",
+        type=Path,
+        default=None,
+        help="MuJoCo scene wrapper; defaults to scene.xml beside the robot XML when present.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--motion-id", type=int, default=0)
     parser.add_argument("--start-step", type=int, default=0)
@@ -1028,6 +1257,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-hz", type=float, default=50.0)
     parser.add_argument("--ground-friction", type=float, default=1.0)
     parser.add_argument("--root-z-offset", type=float, default=0.0)
+    parser.add_argument(
+        "--reference-root-xy-scale",
+        type=float,
+        default=1.0,
+        help="Scale reference root x/y positions and horizontal velocities immediately after MotionLib loading.",
+    )
+    parser.add_argument(
+        "--reference-smoothing-window",
+        type=int,
+        default=1,
+        help="Centered moving-average window in reference frames; must be a positive odd integer, and 1 disables smoothing.",
+    )
+    parser.add_argument(
+        "--reference-ankle-pitch-offset-deg",
+        type=float,
+        default=0.0,
+        help="Add this angle in degrees to both reference ankle-pitch joints before full-body FK.",
+    )
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--camera-distance", type=float, default=3.0)
@@ -1052,6 +1299,18 @@ def parse_args() -> argparse.Namespace:
     _add_bool_arg(parser, "--loop", False, "Reset and replay the selected motion continuously.")
     _add_bool_arg(parser, "--realtime", True, "Rate-limit viewer rollout to policy_hz.")
     _add_bool_arg(parser, "--zero-init-velocity", False, "Zero root and joint velocities when resetting.")
+    _add_bool_arg(
+        parser,
+        "--zero-reference-root-linear-velocity",
+        False,
+        "Zero the reference root linear velocity seen by the backward encoder.",
+    )
+    _add_bool_arg(
+        parser,
+        "--zero-reference-root-xy-motion",
+        False,
+        "Set reference root x/y and horizontal velocity to zero while preserving root-relative motion.",
+    )
     _add_bool_arg(parser, "--disable-action-delay", False, "Disable saved actuator physics-step delays.")
     _add_bool_arg(parser, "--disable-imu-delay", False, "Disable saved IMU delay.")
     _add_bool_arg(
@@ -1078,6 +1337,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--physics-hz and --policy-hz must be positive")
     if args.ground_friction <= 0.0:
         parser.error("--ground-friction must be positive")
+    if not math.isfinite(args.reference_root_xy_scale) or args.reference_root_xy_scale < 0.0:
+        parser.error("--reference-root-xy-scale must be finite and nonnegative")
+    if args.zero_reference_root_xy_motion and args.reference_root_xy_scale != 1.0:
+        parser.error("--zero-reference-root-xy-motion cannot be combined with --reference-root-xy-scale")
+    if args.reference_smoothing_window <= 0 or args.reference_smoothing_window % 2 == 0:
+        parser.error("--reference-smoothing-window must be a positive odd integer")
+    if not math.isfinite(args.reference_ankle_pitch_offset_deg):
+        parser.error("--reference-ankle-pitch-offset-deg must be finite")
     if args.log_every <= 0:
         parser.error("--log-every must be positive")
     if not math.isfinite(args.reference_lateral_offset):

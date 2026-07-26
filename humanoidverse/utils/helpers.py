@@ -2,6 +2,7 @@ import os
 import copy
 import torch
 from torch import nn
+from torch.nn import functional as F
 import random
 
 from typing import Any, List, Dict
@@ -145,7 +146,7 @@ class PolicyExporterLSTM(torch.nn.Module):
     def reset_memory(self):
         self.hidden_state[:] = 0.
         self.cell_state[:] = 0.
- 
+
     def export(self, path):
         os.makedirs(path, exist_ok=True)
         path = os.path.join(path, 'policy_lstm_1.pt')
@@ -154,7 +155,49 @@ class PolicyExporterLSTM(torch.nn.Module):
         traced_script_module.save(path)
 
 
-def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, velocity_multiplier: float = 1.0) -> torch.Tensor:
+def _centered_moving_average(values: torch.Tensor, window: int) -> torch.Tensor:
+    """Smooth the leading time dimension without shortening the sequence."""
+
+    if window <= 0 or window % 2 == 0:
+        raise ValueError(f"Smoothing window must be a positive odd integer, got {window}")
+    if window == 1 or values.shape[0] <= 1:
+        return values
+
+    radius = window // 2
+    original_shape = values.shape
+    channels_first = values.reshape(values.shape[0], -1).transpose(0, 1).unsqueeze(0)
+    padded = F.pad(channels_first, (radius, radius), mode="replicate")
+    smoothed = F.avg_pool1d(padded, kernel_size=window, stride=1)
+    return smoothed.squeeze(0).transpose(0, 1).reshape(original_shape)
+
+
+def _centered_quaternion_moving_average(quaternions: torch.Tensor, window: int) -> torch.Tensor:
+    """Smooth xyzw quaternions after resolving their antipodal signs."""
+
+    if quaternions.shape[-1] != 4:
+        raise ValueError(f"Quaternion sequence must end in dimension 4, got {tuple(quaternions.shape)}")
+    if window <= 0 or window % 2 == 0:
+        raise ValueError(f"Smoothing window must be a positive odd integer, got {window}")
+    if window == 1 or quaternions.shape[0] <= 1:
+        return quaternions
+
+    flattened = quaternions.reshape(quaternions.shape[0], -1, 4)
+    adjacent_dots = (flattened[1:] * flattened[:-1]).sum(dim=-1, keepdim=True)
+    edge_signs = torch.where(adjacent_dots < 0.0, -torch.ones_like(adjacent_dots), torch.ones_like(adjacent_dots))
+    signs = torch.cat((torch.ones_like(edge_signs[:1]), torch.cumprod(edge_signs, dim=0)), dim=0)
+    aligned = flattened * signs
+    smoothed = _centered_moving_average(aligned, window)
+    return F.normalize(smoothed, dim=-1).reshape_as(quaternions)
+
+
+def get_backward_observation(
+    env,
+    motion_id,
+    use_root_height_obs: bool = False,
+    velocity_multiplier: float = 1.0,
+    zero_root_linear_velocity: bool = False,
+    smoothing_window: int = 1,
+) -> torch.Tensor:
     from humanoidverse.utils.torch_utils import quat_rotate_inverse
     from humanoidverse.envs.motion_observations import compute_humanoid_observations_max, compute_humanoid_observations_max_with_contact
     
@@ -164,20 +207,31 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
     # get blend motion state
     motion_state = env._motion_lib.get_motion_state(motion_id, motion_times)
 
-    ref_body_pos = motion_state["rg_pos_t"]
-    ref_body_rots = motion_state["rg_rot_t"]
-    ref_body_vels = motion_state["body_vel_t"] * velocity_multiplier
-    ref_body_angular_vels = motion_state["body_ang_vel_t"] * velocity_multiplier
-    ref_dof_pos = motion_state["dof_pos"] - env.default_dof_pos[0]
-    ref_dof_vel = motion_state["dof_vel"] * velocity_multiplier
+    ref_body_pos = _centered_moving_average(motion_state["rg_pos_t"], smoothing_window)
+    ref_body_rots = _centered_quaternion_moving_average(motion_state["rg_rot_t"], smoothing_window)
+    ref_body_vels = _centered_moving_average(motion_state["body_vel_t"], smoothing_window) * velocity_multiplier
+    ref_body_angular_vels = (
+        _centered_moving_average(motion_state["body_ang_vel_t"], smoothing_window) * velocity_multiplier
+    )
+    ref_dof_pos_absolute = _centered_moving_average(motion_state["dof_pos"], smoothing_window)
+    ref_dof_pos = ref_dof_pos_absolute - env.default_dof_pos[0]
+    ref_dof_vel = _centered_moving_average(motion_state["dof_vel"], smoothing_window) * velocity_multiplier
+
+    # The first rigid body is the root. This narrow ablation zeros the root
+    # body's full linear velocity without changing the remaining body
+    # velocities.
+    ref_body_vels_for_backward = ref_body_vels
+    if zero_root_linear_velocity:
+        ref_body_vels_for_backward = ref_body_vels.clone()
+        ref_body_vels_for_backward[:, 0, :] = 0.0
 
     # construct observation
     if env.use_contact_in_obs_max:
-        contact_binary = env.foot_contact_detect(ref_body_pos, ref_body_vels)
+        contact_binary = env.foot_contact_detect(ref_body_pos, ref_body_vels_for_backward)
         obs_dict = compute_humanoid_observations_max_with_contact(
             ref_body_pos,
             ref_body_rots,
-            ref_body_vels,
+            ref_body_vels_for_backward,
             ref_body_angular_vels,
             local_root_obs=True,
             root_height_obs=use_root_height_obs,
@@ -187,7 +241,7 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
         obs_dict = compute_humanoid_observations_max(
             ref_body_pos,
             ref_body_rots,
-            ref_body_vels,
+            ref_body_vels_for_backward,
             ref_body_angular_vels,
             local_root_obs=True,
             root_height_obs=use_root_height_obs,
@@ -210,13 +264,13 @@ def get_backward_observation(env, motion_id, use_root_height_obs: bool = False, 
             "ref_ang_vel": ref_ang_vel,
             "ref_dof_pos": ref_dof_pos,
             "ref_dof_vel": ref_dof_vel,
-            "dof_pos": motion_state["dof_pos"],
+            "dof_pos": ref_dof_pos_absolute,
             "fake_history": bogus_history_actor,
             "max_local_self_obs": max_local_self_obs,
             "projected_gravity": projected_gravity,
             "ref_body_pos": ref_body_pos,
             "ref_body_rots": ref_body_rots,
-            "ref_body_vels": ref_body_vels,
+            "ref_body_vels": ref_body_vels_for_backward,
             "ref_body_angular_vels": ref_body_angular_vels
         }
         state = torch.cat([ref_dof_pos,
