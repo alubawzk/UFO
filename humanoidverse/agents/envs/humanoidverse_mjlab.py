@@ -309,6 +309,13 @@ def _horizontal_feet_slippage(foot_vel_w: torch.Tensor, foot_contact: torch.Tens
     return torch.sum(horizontal_speed * foot_contact.to(horizontal_speed.dtype), dim=1)
 
 
+def _root_state_at_env_origin(root_state: torch.Tensor, env_origin: torch.Tensor) -> torch.Tensor:
+    """Translate motion-local root positions onto the current terrain patches."""
+    translated = root_state.clone()
+    translated[..., :3] += env_origin.to(device=root_state.device, dtype=root_state.dtype)
+    return translated
+
+
 def _to_list(value) -> list:
     if value is None:
         return []
@@ -1976,12 +1983,12 @@ class HumanoidVerseMjlabCore:
             self.simulator.refresh()
         return None, reward, reset, {"time_outs": time_outs.bool(), "aux_rewards": self.extras["aux_rewards"]}
 
-    def reset_all(self, target_states: dict[str, torch.Tensor] | None = None):
+    def reset_all(self, target_states: dict[str, torch.Tensor | bool] | None = None):
         env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
         self.reset_idx(env_ids, target_states=target_states)
         return None, {}
 
-    def reset_idx(self, env_ids: torch.Tensor, target_states: dict[str, torch.Tensor] | None = None) -> None:
+    def reset_idx(self, env_ids: torch.Tensor, target_states: dict[str, torch.Tensor | bool] | None = None) -> None:
         if len(env_ids) == 0:
             return
         self.mjlab_env.reset(env_ids=env_ids)
@@ -1989,6 +1996,8 @@ class HumanoidVerseMjlabCore:
             self._randomize_default_dof_pos_offset(env_ids)
         if target_states is not None:
             root_xyzw = target_states["root_states"][env_ids].to(self.device, dtype=torch.float32)
+            if bool(target_states.get("root_positions_are_local", False)):
+                root_xyzw = _root_state_at_env_origin(root_xyzw, self.env_origins[env_ids])
             dof_state = target_states["dof_states"][env_ids].to(self.device, dtype=torch.float32)
             joint_pos = dof_state[..., 0]
             joint_vel = dof_state[..., 1]
@@ -2122,9 +2131,10 @@ class HumanoidVerseMjlabCore:
         self._motion_lib.load_motions_for_evaluation(start_idx=global_rank * self.num_envs)
         self.reset_all()
 
-    def set_is_training(self):
+    def set_is_training(self, *, reset: bool = True):
         self.is_evaluating = False
-        self.resample_motion()
+        if reset:
+            self.resample_motion()
 
     def resample_motion(self):
         self._motion_lib.load_motions_for_training(max_num_seqs=self.num_envs)
@@ -2198,7 +2208,7 @@ class HumanoidVerseMjlabVectorEnv(VectorEnv):
         options: dict[str, Any] | None = None,
         to_numpy: bool = True,
         reset_to_default_pose: bool = False,
-        target_states: dict[str, torch.Tensor] | None = None,
+        target_states: dict[str, torch.Tensor | bool] | None = None,
     ):
         del seed, options, reset_to_default_pose
         self.base_env.reset_all(target_states=target_states)

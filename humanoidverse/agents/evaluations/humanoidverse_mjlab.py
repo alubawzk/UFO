@@ -357,10 +357,14 @@ class HumanoidVerseMjlabTrackingEvaluation:
                 v["timestep"] = timestep
                 logger.log(v)
 
-        # Resume back to original state of the motion lib if we were using shared env
+        # Resume the shared motion library before all distributed ranks reset
+        # together in Workspace.train(). Resetting only rank 0 here can leave
+        # the remaining ranks blocked at the post-evaluation barrier.
         if self.cfg.env is None:
             env._env._motion_lib.load_motions_for_training()
-        env._env.set_is_training()
+            env._env.set_is_training(reset=False)
+        else:
+            env._env.set_is_training()
 
         return metrics, wandb_dict
 
@@ -455,7 +459,11 @@ def _async_tracking_worker(
         if root_states_list[i] is None:
             root_states_list[i] = torch.zeros_like(root_states_list[0])
 
-    target_states = {"dof_states": torch.stack(dof_states_list), "root_states": torch.stack(root_states_list)}
+    target_states = {
+        "dof_states": torch.stack(dof_states_list),
+        "root_states": torch.stack(root_states_list),
+        "root_positions_are_local": True,
+    }
 
     env_ids = list(range(num_envs))
     env_ids = torch.tensor(env_ids, dtype=torch.long, device=core_env.device)

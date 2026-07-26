@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from omegaconf import OmegaConf
@@ -17,6 +17,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     _randomize_body_mass_and_inertia,
     _randomize_mini3_actuator_gains,
     _randomize_mini3_rigid_body_material,
+    _root_state_at_env_origin,
     _SimulationStepActionDelay,
     _SimulationStepImuDelay,
     _terrain_levels_tracking,
@@ -161,6 +162,71 @@ def _make_mini3_mjlab_cfg(*, disable_domain_randomization: bool = False):
 
 
 class RobotConfigTrainingTest(unittest.TestCase):
+    def test_tracking_evaluation_offsets_root_state_to_terrain_origin(self) -> None:
+        root_state = torch.tensor([0.2, -0.1, 0.45, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        env_origin = torch.tensor([8.0, -16.0, 0.015])
+
+        translated = _root_state_at_env_origin(root_state, env_origin)
+
+        torch.testing.assert_close(translated[:3], torch.tensor([8.2, -16.1, 0.465]))
+        torch.testing.assert_close(translated[3:], root_state[3:])
+        torch.testing.assert_close(root_state[:3], torch.tensor([0.2, -0.1, 0.45]))
+
+    def test_tracking_reset_uses_terrain_origins_updated_during_reset(self) -> None:
+        core = object.__new__(HumanoidVerseMjlabCore)
+        core.device = torch.device("cpu")
+        core.env_origins = torch.zeros(2, 3)
+        core._default_dof_pos_randomization_mode = "startup"
+        core._joint_ids = torch.tensor([0])
+        core.robot = Mock()
+        core.mjlab_env = Mock()
+        core.mjlab_env._manual_reset_pending = torch.ones(2, dtype=torch.bool)
+        core.actions = torch.ones(2, 1)
+        core.last_actions = torch.ones(2, 1)
+        core.applied_actions = torch.ones(2, 1)
+        core.history_handler = Mock()
+        core._refresh_state = Mock()
+        core._reset_imu_delay = Mock()
+        core.simulator = Mock()
+
+        updated_origins = torch.tensor([[8.0, -16.0, 0.015], [-8.0, 16.0, 0.025]])
+
+        def update_terrain_origins(*, env_ids: torch.Tensor) -> None:
+            core.env_origins[env_ids] = updated_origins[env_ids]
+
+        core.mjlab_env.reset.side_effect = update_terrain_origins
+        target_states = {
+            "root_states": torch.tensor(
+                [
+                    [0.2, -0.1, 0.45, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [-0.3, 0.4, 0.55, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ),
+            "dof_states": torch.zeros(2, 1, 2),
+            "root_positions_are_local": True,
+        }
+
+        core.reset_idx(torch.tensor([0, 1]), target_states=target_states)
+
+        written_root_states = core.robot.write_root_state_to_sim.call_args.args[0]
+        torch.testing.assert_close(
+            written_root_states[:, :3],
+            torch.tensor([[8.2, -16.1, 0.465], [-8.3, 16.4, 0.575]]),
+        )
+
+    def test_set_is_training_can_defer_reset_until_distributed_barrier(self) -> None:
+        core = object.__new__(HumanoidVerseMjlabCore)
+        core.is_evaluating = True
+        core.resample_motion = Mock()
+
+        core.set_is_training(reset=False)
+
+        self.assertFalse(core.is_evaluating)
+        core.resample_motion.assert_not_called()
+
+        core.set_is_training()
+        core.resample_motion.assert_called_once_with()
+
     def test_old_g1_default_builds_cfg(self) -> None:
         cfg = build_ufo_mjlab_config(
             device="cpu",
