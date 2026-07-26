@@ -57,7 +57,7 @@ training:
     - "env.config.env_spacing=2.5"
 
     # Lie down init
-    - "env.config.lie_down_init=True"
+    - "env.config.lie_down_init=False"
     - "env.config.lie_down_init_prob=0.3"
     - "env.config.lie_down_init_height=0.35"
 

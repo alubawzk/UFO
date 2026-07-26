@@ -301,6 +301,14 @@ def _contact_force_mask(contact_forces: torch.Tensor, threshold: float = 1.0) ->
     return torch.linalg.vector_norm(contact_forces, dim=-1) > float(threshold)
 
 
+def _horizontal_feet_slippage(foot_vel_w: torch.Tensor, foot_contact: torch.Tensor) -> torch.Tensor:
+    """Sum world-frame horizontal foot speed for feet currently in contact."""
+    if foot_vel_w.shape[-1] < 2:
+        raise ValueError(f"Expected foot velocities with at least x/y components, got {tuple(foot_vel_w.shape)}")
+    horizontal_speed = torch.linalg.vector_norm(foot_vel_w[..., :2], dim=-1)
+    return torch.sum(horizontal_speed * foot_contact.to(horizontal_speed.dtype), dim=1)
+
+
 def _to_list(value) -> list:
     if value is None:
         return []
@@ -1894,8 +1902,8 @@ class HumanoidVerseMjlabCore:
             torch.sum(torch.square(left_gravity[:, :2]), dim=1).sqrt() * foot_contact[:, 0]
             + torch.sum(torch.square(right_gravity[:, :2]), dim=1).sqrt() * foot_contact[:, 1]
         )
-        foot_vel = self.body_vel[:, self.feet_indices]
-        aux["penalty_slippage"] = torch.sum(torch.norm(foot_vel, dim=-1) * foot_contact, dim=1)
+        foot_vel_w = self.body_vel[:, self.feet_indices]
+        aux["penalty_slippage"] = _horizontal_feet_slippage(foot_vel_w, foot_contact)
         forward_left = my_quat_rotate(left_quat, self.forward_vec)
         forward_right = my_quat_rotate(right_quat, self.forward_vec)
         root_forward = my_quat_rotate(self.base_quat, self.forward_vec)

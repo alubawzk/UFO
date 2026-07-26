@@ -13,6 +13,7 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabCore,
     _compose_humanoidverse_config,
     _contact_force_mask,
+    _horizontal_feet_slippage,
     _randomize_body_mass_and_inertia,
     _randomize_mini3_actuator_gains,
     _randomize_mini3_rigid_body_material,
@@ -525,6 +526,19 @@ class RobotConfigTrainingTest(unittest.TestCase):
         mask = _contact_force_mask(contact_forces)
 
         torch.testing.assert_close(mask, torch.tensor([True, True, False]))
+
+    def test_mjlab_feet_slippage_uses_only_horizontal_velocity(self) -> None:
+        foot_vel_w = torch.tensor(
+            [
+                [[3.0, 4.0, 100.0], [0.0, 0.0, -100.0]],
+                [[0.0, 0.0, 2.0], [6.0, 8.0, 50.0]],
+            ]
+        )
+        foot_contact = torch.tensor([[True, True], [False, True]])
+
+        penalty = _horizontal_feet_slippage(foot_vel_w, foot_contact)
+
+        torch.testing.assert_close(penalty, torch.tensor([5.0, 10.0]))
 
     def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)
