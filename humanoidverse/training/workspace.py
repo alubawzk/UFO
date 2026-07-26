@@ -779,6 +779,8 @@ class Workspace:
                     # priorities
                     priority_payload = None
                     if run_eval_on_this_rank:
+                        if self.cfg.distributed_sync:
+                            print(f"[INFO] Rank 0 starting CPU priority payload preparation at time {global_time}", flush=True)
                         assert len(eval_metrics[self.priorization_eval_name]) == len(replay_buffer["expert_slicer"].motion_ids), (
                             "Mismatch in number of motions returned by the eval"
                         )
@@ -794,7 +796,7 @@ class Workspace:
                             idxs.append(index_in_buffer[metr["motion_id"]])
                         priorities = (
                             torch.clamp(
-                                torch.tensor(priorities, dtype=torch.float32, device=self.agent.device),
+                                torch.tensor(priorities, dtype=torch.float32, device="cpu"),
                                 min=self.cfg.prioritization_min_val,
                                 max=self.cfg.prioritization_max_val,
                             )
@@ -815,16 +817,19 @@ class Workspace:
                         else:
                             raise ValueError(f"Unsupported prioritization mode {self.cfg.prioritization_mode}")
                         priority_payload = {
-                            "priorities": priorities.detach().cpu(),
+                            "priorities": priorities,
                             "idxs": idxs,
                             "file_name": name_in_buffer,
                         }
                         if self.cfg.distributed_sync:
-                            print(f"[INFO] Rank 0 priority payload prepared at time {global_time}; broadcasting over CPU control group")
+                            print(
+                                f"[INFO] Rank 0 priority payload prepared at time {global_time}; broadcasting over CPU control group",
+                                flush=True,
+                            )
                     if self.cfg.distributed_sync:
                         priority_payload = broadcast_object(priority_payload, src=0)
                         if self.distributed_rank == 0:
-                            print(f"[INFO] Distributed CPU priority broadcast completed at time {global_time}")
+                            print(f"[INFO] Distributed CPU priority broadcast completed at time {global_time}", flush=True)
                     if priority_payload is None:
                         raise RuntimeError("Prioritization requires evaluation metrics, but no priority payload was produced.")
                     priorities = priority_payload["priorities"].to(self.agent.device)
@@ -839,7 +844,7 @@ class Workspace:
                         priorities=priorities.to(self.cfg.buffer_device), idxs=torch.tensor(np.array(idxs), device=self.cfg.buffer_device)
                     )
                     if self.distributed_rank == 0:
-                        print(f"[INFO] Motion prioritization update completed at time {global_time}")
+                        print(f"[INFO] Motion prioritization update completed at time {global_time}", flush=True)
 
             if global_time + global_step_increment > self.cfg.num_env_steps:
                 if self._write_shared_artifacts:
