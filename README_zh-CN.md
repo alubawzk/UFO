@@ -301,16 +301,18 @@ uv run python -m humanoidverse.tracking_inference \
 CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.tracking_inference   --model-folder runs/Revise_torque_limit   --data-path humanoidverse/data/lafan1_mini3_ufo/walk4_subject1__clip008.pkl   --robot-config configs/robots/mini3.yaml   --device cuda:0   --headless   --save-mp4   --motion-list 0   --export-onnx true
 
 CUDA_VISIBLE_DEVICES=0 uv run python -m humanoidverse.tracking_inference \
-  --model-folder runs/Revise_torque_limit \
-  --data-path humanoidverse/data/lafan1_mini3_ufo/dance2_subject4__clip013.pkl \
+  --model-folder runs/ufo_fb_lafan1_mini3_real_motor_finetune_selfcollision \
+  --data-path humanoidverse/data/lafan1_mini3_ufo/dance2_subject2__clip013.pkl \
   --robot-config configs/robots/mini3.yaml \
+  --terrain-config terrain_locomotion_mini3_mild \
   --device cuda:0 \
-  --headless false \
   --save-mp4 false \
   --motion-list 0 \
   --disable-dr \
   --disable-obs-noise \
   --export-onnx false \
+  --camera-distance 5 \
+  --camera-elevation -25 \
   --fps 50
 
 ## mujoco test

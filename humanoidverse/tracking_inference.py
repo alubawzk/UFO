@@ -24,12 +24,11 @@ from humanoidverse.export.backward_encoder import (
     export_backward_encoder_from_model,
 )
 from humanoidverse.mjlab_inference_utils import (
+    MjlabSceneViewer,
     MujocoQposRenderer,
-    MujocoQposViewer,
     add_bool_arg,
     checkpoint_load_device,
     load_mjlab_env_cfg,
-    policy_qpos_from_env,
     render_policy_frame,
 )
 from humanoidverse.utils.helpers import export_meta_policy_as_onnx, get_backward_observation
@@ -174,6 +173,7 @@ def run_tracking_inference(
     log_every_steps: int,
     max_episode_length_s: float,
     export_onnx: bool,
+    terrain_config: str | Path | None = None,
 ) -> None:
     model_folder = model_folder.expanduser().resolve()
     checkpoint_dir = model_folder / "checkpoint"
@@ -206,6 +206,7 @@ def run_tracking_inference(
         disable_dr=disable_dr,
         disable_obs_noise=disable_obs_noise,
         max_episode_length_s=max_episode_length_s,
+        terrain_config=terrain_config,
     )
     wrapped_env, _ = env_cfg.build(num_envs=1)
     env = wrapped_env._env
@@ -217,6 +218,16 @@ def run_tracking_inference(
     print(f"[INFO] Rollout XML={env_cfg.mjcf_path}")
     print(f"[INFO] Motion data={env_cfg.lafan_tail_path}")
     print(f"[INFO] Expert renderer XML={robot_xml}")
+    rollout_terrain = env.config.terrain
+    print(
+        "[INFO] Rollout terrain: "
+        f"source={terrain_config if terrain_config is not None else 'checkpoint'}, "
+        f"mesh_type={rollout_terrain.get('mesh_type', 'plane')}, "
+        f"types={list(rollout_terrain.get('terrain_types', []))}, "
+        f"proportions={list(rollout_terrain.get('terrain_proportions', []))}, "
+        f"rough_noise_range={list(rollout_terrain.get('rough_noise_range', []))}",
+        flush=True,
+    )
     if qpos_joint_names != control_joint_names:
         print(f"[INFO] Expert qpos joint order differs from control order: {qpos_joint_names}")
     interactive = not headless
@@ -240,12 +251,12 @@ def run_tracking_inference(
         else None
     )
     live_viewer = (
-        MujocoQposViewer(
-            robot_xml,
+        MjlabSceneViewer(
+            wrapped_env,
             camera_distance=camera_distance,
             camera_azimuth=camera_azimuth,
             camera_elevation=camera_elevation,
-            expected_qpos_size=7 + num_dof,
+            frame_rate=fps,
         )
         if interactive
         else None
@@ -272,7 +283,7 @@ def run_tracking_inference(
             use_env_render = True
 
             if live_viewer is not None:
-                live_viewer.show_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=live_viewer.model.nq))
+                live_viewer.sync(step=0)
 
             print(f"[INFO] Running policy rollout for motion_id={motion_id}, steps={episode_len}", flush=True)
             for step in range(episode_len):
@@ -285,7 +296,7 @@ def run_tracking_inference(
                 observation, _reward, terminated, truncated, _info = wrapped_env.step(action, to_numpy=False)
 
                 if live_viewer is not None:
-                    viewer_closed = not live_viewer.show_qpos(policy_qpos_from_env(wrapped_env, expected_qpos_size=live_viewer.model.nq))
+                    viewer_closed = not live_viewer.sync(step=step + 1)
 
                 if save_mp4:
                     policy_frame, use_env_render = render_policy_frame(
@@ -351,6 +362,14 @@ def parse_args() -> argparse.Namespace:
         "--log-every-steps", type=int, default=100, help="Print rollout/render progress every N steps; 0 disables periodic logs."
     )
     parser.add_argument("--max-episode-length-s", type=float, default=10000.0)
+    parser.add_argument(
+        "--terrain-config",
+        default=None,
+        help=(
+            "Optional Hydra terrain config name or YAML path used for rollout, for example "
+            "'terrain_locomotion_mini3_mild'. By default the checkpoint's saved terrain is reproduced."
+        ),
+    )
     add_bool_arg(parser, "--export-onnx", True, "Export ONNX next to the checkpoint before inference.")
     args = parser.parse_args()
     if args.fps <= 0:
@@ -395,6 +414,7 @@ def main() -> None:
         log_every_steps=args.log_every_steps,
         max_episode_length_s=args.max_episode_length_s,
         export_onnx=args.export_onnx,
+        terrain_config=args.terrain_config,
     )
 
 

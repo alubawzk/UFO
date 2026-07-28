@@ -336,6 +336,7 @@ def load_mjlab_env_cfg(
     disable_dr: bool,
     disable_obs_noise: bool,
     max_episode_length_s: float,
+    terrain_config: str | Path | None = None,
 ) -> tuple[HumanoidVerseMjlabConfig, bool]:
     with (model_folder / "config.json").open("r") as f:
         config = json.load(f)
@@ -371,6 +372,11 @@ def load_mjlab_env_cfg(
     overrides = list(env_config.get("hydra_overrides") or [])
     overrides = replace_hydra_override(overrides, "env.config.max_episode_length_s", max_episode_length_s)
     overrides = replace_hydra_override(overrides, "env.config.headless", str(headless))
+    if terrain_config is not None:
+        terrain_name = Path(terrain_config).stem
+        if not terrain_name:
+            raise ValueError("--terrain-config must name a Hydra terrain config")
+        overrides = replace_hydra_override(overrides, "terrain", terrain_name)
     env_config["hydra_overrides"] = overrides
 
     return HumanoidVerseMjlabConfig(**env_config), use_root_height_obs
@@ -550,6 +556,85 @@ class MujocoQposViewer:
 
     def close(self) -> None:
         self.viewer.close()
+
+
+class MjlabSceneViewer:
+    """Interactive viewer for the complete MJLab rollout scene.
+
+    Unlike :class:`MujocoQposViewer`, this viewer uses the model compiled by the
+    rollout environment, so generated terrain and the simulated robot state are
+    both visible.
+    """
+
+    def __init__(
+        self,
+        wrapped_env: Any,
+        *,
+        camera_distance: float = 3.0,
+        camera_azimuth: float = 135.0,
+        camera_elevation: float = -18.0,
+        frame_rate: float = 50.0,
+    ):
+        # Import lazily so headless inference does not initialize GLFW.
+        from mjlab.viewer.native import NativeMujocoViewer
+
+        core_env = getattr(wrapped_env, "_env", wrapped_env)
+        mjlab_env = getattr(core_env, "mjlab_env", None)
+        if mjlab_env is None:
+            raise TypeError("Interactive MJLab scene viewing requires an environment with a mjlab_env")
+
+        viewer_cfg = mjlab_env.cfg.viewer
+        viewer_cfg.distance = float(camera_distance)
+        viewer_cfg.azimuth = float(camera_azimuth)
+        viewer_cfg.elevation = float(camera_elevation)
+        viewer_cfg.origin_type = viewer_cfg.OriginType.ASSET_ROOT
+        viewer_cfg.entity_name = "robot"
+
+        self.paused = False
+        self.quit_requested = False
+
+        def key_callback(keycode: int) -> None:
+            if keycode == 32:  # Space
+                self.paused = not self.paused
+                self._viewer._is_paused = self.paused
+                print(f"[viewer] {'paused' if self.paused else 'running'}", flush=True)
+            elif keycode in (81, 113):  # Q/q
+                self.quit_requested = True
+
+        self._viewer = NativeMujocoViewer(
+            mjlab_env,
+            policy=lambda observation: observation,
+            frame_rate=float(frame_rate),
+            key_callback=key_callback,
+            enable_perturbations=False,
+        )
+        self._viewer.setup()
+        self.sync(step=0)
+        print(
+            "[viewer] Showing complete MJLab rollout scene (robot + generated terrain). "
+            "Controls: Space pause/resume | Q or close window to quit",
+            flush=True,
+        )
+
+    def is_running(self) -> bool:
+        return not self.quit_requested and self._viewer.is_running()
+
+    def wait_until_running(self) -> bool:
+        while self.is_running() and self.paused:
+            self._viewer.sync_env_to_viewer()
+            time.sleep(0.01)
+        return self.is_running()
+
+    def sync(self, *, step: int | None = None) -> bool:
+        if not self.is_running():
+            return False
+        if step is not None:
+            self._viewer._step_count = int(step)
+        self._viewer.sync_env_to_viewer()
+        return self.is_running()
+
+    def close(self) -> None:
+        self._viewer.close()
 
 
 def policy_qpos_from_env(wrapped_env: Any, *, expected_qpos_size: int) -> np.ndarray:

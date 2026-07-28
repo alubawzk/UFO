@@ -274,10 +274,10 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertEqual(generator_cfg.num_rows, 5)
         self.assertEqual(generator_cfg.num_cols, 10)
         self.assertEqual(set(generator_cfg.sub_terrains), {"flat", "rough"})
-        self.assertEqual(generator_cfg.sub_terrains["flat"].proportion, 0.7)
+        self.assertEqual(generator_cfg.sub_terrains["flat"].proportion, 0.6)
 
         rough_cfg = generator_cfg.sub_terrains["rough"]
-        self.assertEqual(rough_cfg.proportion, 0.3)
+        self.assertEqual(rough_cfg.proportion, 0.4)
         self.assertEqual(rough_cfg.noise_range, (0.0, 0.03))
         self.assertEqual(rough_cfg.noise_step, 0.005)
         self.assertEqual(rough_cfg.downsampled_scale, 0.2)
@@ -389,6 +389,23 @@ class RobotConfigTrainingTest(unittest.TestCase):
             args = parse_tracking_args()
         self.assertFalse(args.headless)
         self.assertFalse(args.save_mp4)
+
+    def test_tracking_accepts_explicit_terrain_override(self) -> None:
+        argv = [
+            "tracking_inference.py",
+            "--model-folder",
+            "/tmp/ufo_unit_model",
+            "--terrain-config",
+            "humanoidverse/config/terrain/terrain_locomotion_mini3_mild.yaml",
+            "--export-onnx",
+            "false",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = parse_tracking_args()
+        self.assertEqual(
+            args.terrain_config,
+            "humanoidverse/config/terrain/terrain_locomotion_mini3_mild.yaml",
+        )
 
     def test_tracking_cli_manifest_robot_config_mismatch_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
