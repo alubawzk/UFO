@@ -13,6 +13,8 @@ from humanoidverse.agents.envs.humanoidverse_mjlab import (
     HumanoidVerseMjlabCore,
     _compose_humanoidverse_config,
     _contact_force_mask,
+    _horizontal_speed,
+    _make_terrain_entity_cfg,
     _randomize_dc_motor_strength,
     _SimulationStepActionDelay,
     _SimulationStepImuDelay,
@@ -201,9 +203,7 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertEqual(event.params["kd_range"], (0.75, 1.25))
         self.assertEqual(event.params["operation"], "scale")
 
-        self.assertTrue(hv_config.lie_down_init)
-        self.assertEqual(float(hv_config.lie_down_init_prob), 0.3)
-        self.assertEqual(float(hv_config.lie_down_init_height), 0.1)
+        self.assertFalse(hv_config.lie_down_init)
         self.assertTrue(hv_config.domain_rand.randomize_ctrl_delay)
         self.assertEqual(int(hv_config.simulator.config.sim.fps), 500)
         self.assertEqual(int(hv_config.simulator.config.sim.control_decimation), 10)
@@ -214,9 +214,9 @@ class RobotConfigTrainingTest(unittest.TestCase):
         delay_by_joint = dict(
             zip(load_robot_training_spec("configs/robots/mini3.yaml").robot.control_joint_names, action_cfg.delay_step_ranges)
         )
-        self.assertEqual(delay_by_joint["left_hip_pitch_joint"], (4, 4))
+        self.assertEqual(delay_by_joint["left_hip_pitch_joint"], (3, 5))
         self.assertEqual(delay_by_joint["left_ankle_pitch_joint"], (3, 5))
-        self.assertEqual(delay_by_joint["left_shoulder_pitch_joint"], (0, 0))
+        self.assertEqual(delay_by_joint["left_shoulder_pitch_joint"], (3, 5))
         self.assertEqual(action_cfg.delay_group_names.count("4340P"), 9)
         self.assertEqual(action_cfg.delay_group_names.count("ankles"), 4)
         self.assertEqual(action_cfg.delay_group_names.count("arms"), 8)
@@ -245,6 +245,44 @@ class RobotConfigTrainingTest(unittest.TestCase):
         self.assertTrue(all(step_range == (0, 0) for step_range in mjlab_config.actions["actions"].delay_step_ranges))
         self.assertFalse(hv_config.domain_rand.randomize_motor_strength)
         self.assertNotIn("random_motor_strength", mjlab_config.events)
+
+    def test_plane_terrain_config_builds_plane_entity(self) -> None:
+        terrain_cfg = _make_terrain_entity_cfg(
+            OmegaConf.create({"mesh_type": "plane"}),
+            env_spacing=3.5,
+            seed=1,
+        )
+
+        self.assertEqual(terrain_cfg.terrain_type, "plane")
+        self.assertEqual(terrain_cfg.env_spacing, 3.5)
+        self.assertIsNone(terrain_cfg.terrain_generator)
+
+    def test_mini3_uses_mild_rough_terrain_generator(self) -> None:
+        hv_config, mjlab_config = _make_mini3_mjlab_cfg()
+
+        self.assertFalse(hv_config.lie_down_init)
+        self.assertEqual(hv_config.terrain.mesh_type, "generator")
+        terrain_cfg = mjlab_config.scene.terrain
+        self.assertEqual(terrain_cfg.terrain_type, "generator")
+        self.assertEqual(terrain_cfg.max_init_terrain_level, 4)
+
+        generator_cfg = terrain_cfg.terrain_generator
+        self.assertIsNotNone(generator_cfg)
+        self.assertEqual(generator_cfg.seed, 1)
+        self.assertFalse(generator_cfg.curriculum)
+        self.assertEqual(generator_cfg.size, (8.0, 8.0))
+        self.assertEqual(generator_cfg.num_rows, 5)
+        self.assertEqual(generator_cfg.num_cols, 10)
+        self.assertEqual(set(generator_cfg.sub_terrains), {"flat", "rough"})
+        self.assertEqual(generator_cfg.sub_terrains["flat"].proportion, 0.7)
+
+        rough_cfg = generator_cfg.sub_terrains["rough"]
+        self.assertEqual(rough_cfg.proportion, 0.3)
+        self.assertEqual(rough_cfg.noise_range, (0.0, 0.03))
+        self.assertEqual(rough_cfg.noise_step, 0.005)
+        self.assertEqual(rough_cfg.downsampled_scale, 0.2)
+        self.assertEqual(rough_cfg.horizontal_scale, 0.1)
+        self.assertEqual(rough_cfg.vertical_scale, 0.005)
 
     def test_mini3_actuator_dynamics_reach_mjlab_cfg(self) -> None:
         training = load_robot_training_spec("configs/robots/mini3.yaml")
@@ -403,6 +441,18 @@ class RobotConfigTrainingTest(unittest.TestCase):
         mask = _contact_force_mask(contact_forces)
 
         torch.testing.assert_close(mask, torch.tensor([True, True, False]))
+
+    def test_mjlab_horizontal_speed_ignores_vertical_velocity(self) -> None:
+        linear_velocity = torch.tensor(
+            [
+                [0.0, 0.0, 3.0],
+                [3.0, 4.0, 12.0],
+            ]
+        )
+
+        speed = _horizontal_speed(linear_velocity)
+
+        torch.testing.assert_close(speed, torch.tensor([0.0, 5.0]))
 
     def test_mjlab_action_input_reorders_policy_actions_to_action_term_order(self) -> None:
         core = object.__new__(HumanoidVerseMjlabCore)

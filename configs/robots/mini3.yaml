@@ -54,9 +54,10 @@ training:
     # 500 Hz physics with a 50 Hz policy/control update.
     - "simulator.config.sim.fps=500"
     - "simulator.config.sim.control_decimation=10"
+    - "terrain=terrain_locomotion_mini3_mild"
 
     # Lie down init
-    - "env.config.lie_down_init=True"
+    - "env.config.lie_down_init=False"
     - "env.config.lie_down_init_prob=0.3"
     - "env.config.lie_down_init_height=0.35"
 
@@ -68,8 +69,8 @@ training:
     # Domain randomization
     - "domain_rand.push_robots=true"
     - "domain_rand.randomize_base_com=true"
-    - "domain_rand.base_com_range.x=[-0.03,0.03]"
-    - "domain_rand.base_com_range.y=[-0.03,0.03]"
+    - "domain_rand.base_com_range.x=[-0.05,0.05]"
+    - "domain_rand.base_com_range.y=[-0.05,0.05]"
     - "domain_rand.link_mass_range=[0.98,1.02]"
     - "domain_rand.friction_range=[0.5,2.2]"
     - "domain_rand.randomize_pd_gain=true"
@@ -85,6 +86,7 @@ training:
       aux_rewards_scaling:
         penalty_action_rate: -0.2
         penalty_ankle_roll: -1.0
+        penalty_slippage: -4.0
 
   # IMU latency is sampled independently for every environment and episode.
   # The buffer advances at 500 Hz; only the actor's angular velocity and
@@ -235,8 +237,8 @@ training:
           - right_hip_yaw_joint
           - right_knee_pitch_joint
           - waist_yaw_joint
-        min_delay: 4
-        max_delay: 4
+        min_delay: 3
+        max_delay: 5
       ankles:
         joint_names:
           - left_ankle_pitch_joint
@@ -255,8 +257,8 @@ training:
           - right_shoulder_roll_joint
           - right_shoulder_yaw_joint
           - right_elbow_pitch_joint
-        min_delay: 0
-        max_delay: 0
+        min_delay: 3
+        max_delay: 5
     joints:
       left_hip_pitch_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}
       left_hip_roll_joint: {effort_limit: 27.0, velocity_limit: 10.0, armature: 0.04595206677913666, friction: 1.0523104667663574, viscous_friction: 0.2500821053981781}

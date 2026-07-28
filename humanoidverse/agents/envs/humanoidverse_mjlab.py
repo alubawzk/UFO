@@ -300,6 +300,13 @@ def _contact_force_mask(contact_forces: torch.Tensor, threshold: float = 1.0) ->
     return torch.linalg.vector_norm(contact_forces, dim=-1) > float(threshold)
 
 
+def _horizontal_speed(linear_velocity: torch.Tensor) -> torch.Tensor:
+    """Return world-frame horizontal speed for a Z-up simulation."""
+    if linear_velocity.shape[-1] != 3:
+        raise ValueError(f"Expected linear velocity with a final dimension of 3, got {tuple(linear_velocity.shape)}")
+    return torch.linalg.vector_norm(linear_velocity[..., :2], dim=-1)
+
+
 def _to_list(value) -> list:
     if value is None:
         return []
@@ -387,6 +394,72 @@ def _randomize_dc_motor_strength(env, env_ids, strength_range: tuple[float, floa
 def _to_float_dict(value) -> dict[str, float]:
     value = OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
     return {str(k): float(v) for k, v in value.items()}
+
+
+def _make_terrain_entity_cfg(terrain_config, *, env_spacing: float, seed: int | None):
+    """Translate HumanoidVerse terrain settings into an MJLab terrain entity."""
+    from mjlab.terrains import (
+        BoxFlatTerrainCfg,
+        HfRandomUniformTerrainCfg,
+        TerrainEntityCfg,
+        TerrainGeneratorCfg,
+    )
+
+    mesh_type = str(terrain_config.get("mesh_type", "plane")).lower()
+    if mesh_type == "plane":
+        return TerrainEntityCfg(terrain_type="plane", env_spacing=float(env_spacing))
+    if mesh_type != "generator":
+        raise ValueError(f"Unsupported MJLab terrain mesh_type {mesh_type!r}; expected 'plane' or 'generator'")
+
+    terrain_types = [str(value) for value in _to_list(terrain_config.get("terrain_types"))]
+    proportions = [float(value) for value in _to_list(terrain_config.get("terrain_proportions"))]
+    if not terrain_types or len(terrain_types) != len(proportions):
+        raise ValueError(
+            "Generator terrain requires non-empty terrain_types and equally sized terrain_proportions, "
+            f"got {terrain_types} and {proportions}"
+        )
+    if len(set(terrain_types)) != len(terrain_types):
+        raise ValueError(f"Generator terrain_types must be unique, got {terrain_types}")
+    if any(proportion < 0.0 for proportion in proportions) or sum(proportions) <= 0.0:
+        raise ValueError(f"Generator terrain_proportions must be non-negative with a positive sum, got {proportions}")
+
+    horizontal_scale = float(terrain_config.horizontal_scale)
+    vertical_scale = float(terrain_config.vertical_scale)
+    rough_noise_range = tuple(float(value) for value in _to_list(terrain_config.get("rough_noise_range")))
+    if len(rough_noise_range) != 2 or rough_noise_range[0] > rough_noise_range[1]:
+        raise ValueError(f"terrain.rough_noise_range must contain [min, max], got {rough_noise_range}")
+
+    sub_terrains = {}
+    for terrain_type, proportion in zip(terrain_types, proportions):
+        if terrain_type == "flat":
+            sub_terrains[terrain_type] = BoxFlatTerrainCfg(proportion=proportion)
+        elif terrain_type == "rough":
+            sub_terrains[terrain_type] = HfRandomUniformTerrainCfg(
+                proportion=proportion,
+                noise_range=rough_noise_range,
+                noise_step=float(terrain_config.rough_noise_step),
+                downsampled_scale=float(terrain_config.rough_downsampled_scale),
+                horizontal_scale=horizontal_scale,
+                vertical_scale=vertical_scale,
+                border_width=float(terrain_config.rough_border_width),
+            )
+        else:
+            raise ValueError(f"Unsupported MJLab generator terrain type {terrain_type!r}; supported types are 'flat' and 'rough'")
+
+    max_init_terrain_level = terrain_config.get("max_init_terrain_level")
+    return TerrainEntityCfg(
+        terrain_type="generator",
+        terrain_generator=TerrainGeneratorCfg(
+            seed=seed,
+            curriculum=bool(terrain_config.get("curriculum", False)),
+            size=(float(terrain_config.terrain_length), float(terrain_config.terrain_width)),
+            border_width=float(terrain_config.get("border_size", 0.0)),
+            num_rows=int(terrain_config.num_rows),
+            num_cols=int(terrain_config.num_cols),
+            sub_terrains=sub_terrains,
+        ),
+        max_init_terrain_level=None if max_init_terrain_level is None else int(max_init_terrain_level),
+    )
 
 
 def _match_joint_value(joint_name: str, value_by_substring: dict[str, float], default: float = 0.0) -> float:
@@ -714,7 +787,6 @@ def make_mjlab_ufo_env_cfg(
     from mjlab.scene import SceneCfg
     from mjlab.sensor.contact_sensor import ContactMatch, ContactSensorCfg
     from mjlab.sim import MujocoCfg, SimulationCfg
-    from mjlab.terrains import TerrainEntityCfg
 
     from humanoidverse.agents.envs.mini3_real_motor_actuator import (
         Mini3ParallelAnkleRealMotorActuatorCfg,
@@ -1071,7 +1143,7 @@ def make_mjlab_ufo_env_cfg(
         scene=SceneCfg(
             num_envs=num_envs,
             env_spacing=float(config.env_spacing),
-            terrain=TerrainEntityCfg(terrain_type="plane", env_spacing=float(config.env_spacing)),
+            terrain=_make_terrain_entity_cfg(config.terrain, env_spacing=float(config.env_spacing), seed=seed),
             entities={"robot": robot_cfg},
             sensors=sensors,
         ),
@@ -1583,7 +1655,7 @@ class HumanoidVerseMjlabCore:
             + torch.sum(torch.square(right_gravity[:, :2]), dim=1).sqrt() * foot_contact[:, 1]
         )
         foot_vel = self.body_vel[:, self.feet_indices]
-        aux["penalty_slippage"] = torch.sum(torch.norm(foot_vel, dim=-1) * foot_contact, dim=1)
+        aux["penalty_slippage"] = torch.sum(_horizontal_speed(foot_vel) * foot_contact, dim=1)
         forward_left = my_quat_rotate(left_quat, self.forward_vec)
         forward_right = my_quat_rotate(right_quat, self.forward_vec)
         root_forward = my_quat_rotate(self.base_quat, self.forward_vec)

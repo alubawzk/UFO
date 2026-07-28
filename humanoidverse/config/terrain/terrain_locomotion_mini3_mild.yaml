@@ -1,0 +1,31 @@
+# @package _global_
+
+defaults:
+  - terrain_base
+
+terrain:
+  mesh_type: generator
+  static_friction: 1.0
+  dynamic_friction: 1.0
+  restitution: 0.0
+
+  # Mini3 currently has no terrain-height observations, so keep the initial
+  # distribution mostly flat and limit the roughness to a few centimetres.
+  curriculum: false
+  measure_heights: false
+  terrain_length: 8.0
+  terrain_width: 8.0
+  num_rows: 5
+  num_cols: 10
+  border_size: 2.0
+  max_init_terrain_level: 4
+
+  terrain_types: [flat, rough]
+  terrain_proportions: [0.6, 0.4]
+
+  horizontal_scale: 0.1
+  vertical_scale: 0.005
+  rough_noise_range: [0.0, 0.03]
+  rough_noise_step: 0.005
+  rough_downsampled_scale: 0.2
+  rough_border_width: 0.25

@@ -230,10 +230,10 @@ nohup bash -lc '
     --gpu-ids all \
     --num-envs 1024 \
     --num-env-steps 192000000 \
-    --buffer-size 1500000 \
+    --buffer-size 5120000 \
+    --update-z-every-step 100 \
     --checkpoint-every-steps 3200000 \
-    --cartwheel-aux-safe \
-    --work-dir runs/ufo_fb_lafan1_mini3_7gpu_ReviseFeetRoll_AddJointParams
+    --work-dir runs/ReviseFeetSlip_AddTerrain_NoLieDown
 ' > /home/wzk/UFO/ufo_fb_lafan1_mini3_AddJointParams.log 2>&1 &
 
 ## Fine-tune
